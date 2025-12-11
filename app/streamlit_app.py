@@ -185,63 +185,49 @@ def load_matchai_config(path: str | None = None):
             },
         }
 
+
 @st.cache_resource
 def load_models_and_pipelines(cfg: dict):
     """
-    Load classifier, summarizer, embedding model and NER pipeline.
-
-    If Hugging Face download fails (e.g. no internet / rate limit on Streamlit Cloud),
-    show a clear error and stop the app gracefully.
+    Load all Hugging Face models, optionally using a HF token
+    (from Streamlit secrets or environment variable HF_TOKEN).
     """
-    clf_id = cfg["fine_tuned_model_id"]
-    sum_id = cfg["summarization_model"]
-    emb_id = cfg["embedding_model"]
-    ner_id = cfg["ner_model"]
-
-    st.write("Loading models…")
-    st.write(f"- Classifier: `{clf_id}`")
-    st.write(f"- Summariser: `{sum_id}`")
-    st.write(f"- Embeddings: `{emb_id}`")
-    st.write(f"- NER: `{ner_id}`")
-
+    hf_token = None
     try:
-        # Classifier
-        clf_tokenizer = AutoTokenizer.from_pretrained(clf_id)
-        clf_model = AutoModelForSequenceClassification.from_pretrained(clf_id)
-        clf_model.to(device)
-        clf_model.eval()
+        # Streamlit Cloud / local secrets
+        hf_token = st.secrets.get("HF_TOKEN", None)
+    except Exception:
+        hf_token = None
+    if not hf_token:
+        hf_token = os.getenv("HF_TOKEN", None)
 
-        # Summarizer
-        summarizer = hf_pipeline(
-            "summarization",
-            model=sum_id,
-            device=0 if torch.cuda.is_available() else -1,
-        )
+    # Classifier
+    clf_id = cfg["fine_tuned_model_id"]
+    clf_tokenizer = AutoTokenizer.from_pretrained(clf_id, token=hf_token)
+    clf_model = AutoModelForSequenceClassification.from_pretrained(
+        clf_id, token=hf_token
+    )
+    clf_model.to(device)
+    clf_model.eval()
 
-        # Embedding model
-        sim_model = SentenceTransformer(emb_id)
+    # Summariser
+    summarizer = hf_pipeline(
+        "summarization",
+        model=cfg["summarization_model"],
+        device=0 if torch.cuda.is_available() else -1,
+        token=hf_token,
+    )
 
-        # NER pipeline
-        ner_pipe = hf_pipeline("ner", model=ner_id, grouped_entities=True)
+    # Embedding model
+    sim_model = SentenceTransformer(cfg["embedding_model"], token=hf_token)
 
-    except OSError as e:
-        st.error(
-            "❌ MatchAI couldn’t download one of the Hugging Face models.\n\n"
-            "This usually means Streamlit Cloud could not reach Hugging Face "
-            "or the model ID is invalid.\n\n"
-            "Please try one of the following:\n"
-            "• Run the app locally (where you have internet access to Hugging Face), or\n"
-            "• Double-check the model ID in `matchai_config.json`, or\n"
-            "• Wait and refresh in case it was a temporary network issue.\n\n"
-            f"Technical details:\n`{e}`"
-        )
-        st.stop()
-    except Exception as e:
-        st.error(
-            "❌ MatchAI hit an unexpected error while loading models.\n\n"
-            f"Details: {e}"
-        )
-        st.stop()
+    # NER pipeline
+    ner_pipe = hf_pipeline(
+        "ner",
+        model=cfg["ner_model"],
+        grouped_entities=True,
+        token=hf_token,
+    )
 
     # Label mapping
     raw_map = cfg.get(
@@ -277,6 +263,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         st.warning(f"Could not read PDF: {e}")
         return ""
 
+
 def extract_text_from_docx(file_bytes: bytes) -> str:
     try:
         with io.BytesIO(file_bytes) as f:
@@ -285,6 +272,7 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
     except Exception as e:
         st.warning(f"Could not read Word file: {e}")
         return ""
+
 
 def summarize_text(text: str, max_len: int = 150) -> str:
     if not text or not isinstance(text, str):
@@ -302,6 +290,7 @@ def summarize_text(text: str, max_len: int = 150) -> str:
         st.warning(f"Summarisation issue: {e}")
         return truncated[:300]
 
+
 def compute_similarity(text1: str, text2: str) -> float:
     if not text1 or not text2:
         return 0.0
@@ -309,6 +298,7 @@ def compute_similarity(text1: str, text2: str) -> float:
     emb2 = sim_model.encode(text2, convert_to_tensor=True)
     sim = cosine_similarity(emb1, emb2, dim=0).item()
     return float(sim)
+
 
 def extract_entities(text: str):
     if not text or not isinstance(text, str):
@@ -321,6 +311,7 @@ def extract_entities(text: str):
         if label in result and word:
             result[label].append(word)
     return result
+
 
 def predict_fit_label(jd_text: str, res_text: str):
     combined = res_text + " [SEP] " + jd_text
@@ -342,15 +333,18 @@ def predict_fit_label(jd_text: str, res_text: str):
         "probs": probs.tolist(),
     }
 
+
 def process_job_description(jd_text: str):
     summary = summarize_text(jd_text)
     keywords = list({w.lower() for w in summary.split() if len(w) > 4})
     return {"raw": jd_text, "summary": summary, "keywords": keywords}
 
+
 def process_resume(res_text: str):
     summary = summarize_text(res_text)
     entities = extract_entities(res_text)
     return {"raw": res_text, "summary": summary, "entities": entities}
+
 
 def keyword_match_score(jd_keywords, resume_summary: str) -> float:
     if not jd_keywords:
@@ -359,106 +353,110 @@ def keyword_match_score(jd_keywords, resume_summary: str) -> float:
     hits = sum(1 for kw in jd_keywords if kw in resume_words)
     return hits / len(jd_keywords)
 
-def _clean_org_list(orgs: list[str]) -> list[str]:
+
+def _clean_org_entities(org_list):
     """
-    Try to remove noise like 'CA', 'Finance', single letters, etc.,
-    and keep more realistic organisation names.
+    Helper to clean NER 'ORG' outputs so we don't show weird fragments
+    like 'ERICA CH, CA, Finance'.
     """
     cleaned = []
-    for org in orgs:
-        o = org.strip()
-        core = o.replace(" ", "")
-        if len(core) < 3:
-            continue
-        # skip very generic tokens
-        lowered = o.lower()
-        if lowered in {"finance", "accounting", "university"}:
-            continue
-        cleaned.append(o)
-    # keep unique order
-    unique = []
     seen = set()
-    for o in cleaned:
-        if o not in seen:
-            seen.add(o)
-            unique.append(o)
-    return unique
+    for raw in org_list:
+        name = raw.strip(" ,.;:-")
+        if not name:
+            continue
+        # Drop very short tokens
+        if len(name) < 3:
+            continue
+        # Drop generic words
+        if name.lower() in {"finance", "management", "engineer"}:
+            continue
+        # Collapse shouty acronyms that are too short
+        if name.isupper() and len(name) <= 3:
+            continue
+        if name not in seen:
+            seen.add(name)
+            cleaned.append(name)
+    return cleaned
+
 
 def generate_candidate_highlights(result_dict: dict) -> str:
     """
-    Build a short, natural-language highlight that gives an immediate feel
-    for the candidate: overall fit, key strengths + orgs, based on the model outputs.
+    Produce a short, natural-language summary that helps an HR user
+    very quickly understand why this candidate is (or is not) a good match.
     """
     label = result_dict["fit"]["label_name"]
     score_pct = result_dict["final_score"] * 100
     sim = result_dict["similarity"]
     kw = result_dict["keyword_score"]
-    prob_good = result_dict["prob_good_fit"]
+
+    jd_keywords = result_dict["jd"].get("keywords", [])
+    resume_summary = (result_dict["resume"].get("summary", "") or "").lower()
     ents = result_dict["resume"]["entities"]
     orgs_raw = ents.get("ORG", [])
-    orgs = _clean_org_list(orgs_raw)
-    resume_summary = result_dict["resume"].get("summary", "").strip()
+    orgs = _clean_org_entities(orgs_raw)
 
-    parts = []
-
-    # 1) Overall fit sentence
+    # 1. Overall fit sentence
     if label.lower().startswith("good") and score_pct >= 80:
-        parts.append(
-            f"Overall this profile looks like a strong match for the role "
-            f"(suitability score {score_pct:.0f}% and P(Good Fit) {prob_good:.0%})."
+        overall = "This candidate appears to be a strong fit for the role."
+    elif "good" in label.lower() or "potential" in label:
+        overall = "This candidate shows a reasonable match with room to grow into the role."
+    else:
+        overall = "This candidate shows a limited match based on the current resume content."
+
+    # 2. Evidence from similarity
+    if sim >= 0.8:
+        sim_text = "Their experience is very close to the job requirements (high semantic similarity)."
+    elif sim >= 0.65:
+        sim_text = "Their experience overlaps in several areas with the job requirements."
+    else:
+        sim_text = "There is only partial overlap between their experience and the job requirements."
+
+    # 3. Evidence from keywords – mention a few concrete terms if possible
+    covered_terms = []
+    for kw_term in jd_keywords:
+        if kw_term in resume_summary:
+            covered_terms.append(kw_term)
+        if len(covered_terms) >= 4:
+            break
+
+    if kw >= 0.6 and covered_terms:
+        kw_text = (
+            "Key strengths against the role include: "
+            + ", ".join(covered_terms)
+            + "."
         )
-    elif "Potential" in label:
-        parts.append(
-            f"This profile appears to be a potential fit, with some relevant strengths "
-            f"(suitability score {score_pct:.0f}%)."
+    elif kw >= 0.6:
+        kw_text = "They cover most of the core skills and requirements mentioned in the job description."
+    elif kw >= 0.4 and covered_terms:
+        kw_text = (
+            "They match some important requirements, for example: "
+            + ", ".join(covered_terms)
+            + "."
+        )
+    elif kw >= 0.4:
+        kw_text = "They match a portion of the key skills, but some priority areas appear weaker."
+    else:
+        kw_text = "Coverage of the specified skills and requirements looks limited."
+
+    # 4. Organisations for extra colour
+    if orgs:
+        org_text = (
+            "They also have experience with organisations such as "
+            + ", ".join(orgs[:3])
+            + "."
         )
     else:
-        parts.append(
-            f"Based on the current resume, this looks like a weaker match "
-            f"(suitability score {score_pct:.0f}% and lower P(Good Fit))."
-        )
+        org_text = ""
 
-    # 2) Semantic similarity / keyword coverage
-    if sim >= 0.8 and kw >= 0.6:
-        parts.append(
-            "The experience and skills described line up closely with the job description, "
-            "both in overall content and in key requirements."
-        )
-    elif sim >= 0.8:
-        parts.append(
-            "There is strong semantic overlap with the job description, suggesting closely related experience."
-        )
-    elif sim >= 0.65:
-        parts.append(
-            "There is moderate semantic overlap with the job description, indicating some relevant background."
-        )
+    # Put it together in a natural way
+    parts = [overall, sim_text, kw_text]
+    if org_text:
+        parts.append(org_text)
 
-    if kw >= 0.6:
-        parts.append(
-            "Many of the important skills and requirements from the job description are explicitly reflected in the resume."
-        )
-    elif 0.3 <= kw < 0.6:
-        parts.append(
-            "Some core requirements appear in the resume, but parts of the role may still require development."
-        )
+    highlight = " ".join(parts).strip()
+    return highlight or "No clear automatic signals – manual review recommended."
 
-    # 3) Organisations / employer signal
-    if orgs:
-        shown = ", ".join(orgs[:3])
-        parts.append(f"The candidate has experience with organisations such as {shown}.")
-
-    # 4) One short “profile hint” from the summary, if it looks reasonable
-    if resume_summary:
-        first_sentence = resume_summary.split(".")[0].strip()
-        if len(first_sentence) > 20:
-            parts.append(f"Profile summary: {first_sentence}.")
-
-    if not parts:
-        return "No clear strengths stand out from the automated signals; manual review is recommended."
-
-    # Make it flow as 2–4 short sentences
-    highlight = " ".join(parts)
-    return highlight.strip()
 
 def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
     jd = process_job_description(jd_text)
@@ -470,10 +468,10 @@ def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
     kw_score = keyword_match_score(jd["keywords"], res["summary"])
 
     fit = predict_fit_label(jd_text, res_text)
-    # For 3-class or 2-class models
     if len(fit["probs"]) >= 3:
         prob_good_fit = fit["probs"][2]
     else:
+        # For 2-class placeholder, use the probability of the predicted label
         prob_good_fit = fit["probs"][fit["label_id"]]
 
     final_score = (
@@ -495,6 +493,7 @@ def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
     result["highlight"] = generate_candidate_highlights(result)
     return result
 
+
 def evaluate_batch(jd_text: str, resumes_list: list, weights: dict):
     results = []
     for item in resumes_list:
@@ -508,6 +507,7 @@ def evaluate_batch(jd_text: str, resumes_list: list, weights: dict):
     results_sorted = sorted(results, key=lambda x: x["final_score"], reverse=True)
     return results_sorted
 
+
 def map_priority(score: float) -> str:
     if score >= 0.8:
         return "Interview priority: HIGH"
@@ -515,6 +515,7 @@ def map_priority(score: float) -> str:
         return "Interview priority: MEDIUM"
     else:
         return "Interview priority: LOW"
+
 
 def clear_all_inputs():
     for key in ["jd_text", "resume_text", "uploaded_files"]:
@@ -651,7 +652,7 @@ with st.container():
         with st.expander("ℹ️  How is the score calculated?", expanded=False):
             st.write(
                 "The final suitability score combines three signals:\n"
-                "- **P(Good Fit)** from the fine-tuned classifier\n"
+                "- **P(Good Fit)** from the classifier\n"
                 "- **Semantic similarity** between JD and resume summaries\n"
                 "- **Keyword coverage** of JD terms in the resume\n\n"
                 "Default formula:\n"
@@ -759,7 +760,7 @@ with st.container():
             st.write(f"**P(Good Fit):** {prob_good:.2f}")
             st.write(f"**{map_priority(score)}**")
             st.write(f"**Highlight:** {result['highlight']}")
-            st.markdown("</div>", unsafe_allow_html=True)
+            st.markmarkdown("</div>", unsafe_allow_html=True)
 
             m1, m2, m3 = st.columns(3)
             with m1:
