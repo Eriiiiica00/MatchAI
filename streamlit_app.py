@@ -1,5 +1,6 @@
 import json
 import io
+import os
 import streamlit as st
 import torch
 import numpy as np
@@ -61,13 +62,22 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ============================================================
 
 @st.cache_resource
-def load_matchai_config(path: str = "matchai_config.json"):
+def load_matchai_config(path: str | None = None):
+    """
+    Load matchai_config.json from the same folder as streamlit_app.py
+    so it works both locally and on Streamlit Cloud.
+    """
+    # If no path passed, build it relative to this file
+    if path is None:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base_dir, "matchai_config.json")
+
     try:
         with open(path, "r") as f:
             cfg = json.load(f)
         return cfg
     except Exception as e:
-        st.error(f"Could not load matchai_config.json: {e}")
+        st.error(f"Could not load matchai_config.json at: {path}\nUsing fallback config. Error: {e}")
         # Fallback config (adjust IDs if needed)
         return {
             "fine_tuned_model_id": "your-username/matchai-fit-classifier",
