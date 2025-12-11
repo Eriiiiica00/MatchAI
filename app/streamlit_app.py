@@ -1,456 +1,799 @@
+import json
 import io
-import textwrap
-from typing import Dict, Any, Tuple, List
-
+import os
 import streamlit as st
+import torch
 import numpy as np
 
-from sentence_transformers import SentenceTransformer, util
-from transformers import pipeline
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    pipeline as hf_pipeline,
+)
+from sentence_transformers import SentenceTransformer
+from torch.nn.functional import softmax, cosine_similarity
 
-# ---------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------
+import PyPDF2
+import docx2txt
 
-class AppConfig:
-    def __init__(self):
-        # Text similarity / embeddings model
-        self.sim_model_name = "sentence-transformers/all-MiniLM-L6-v2"
+# ============================================================
+# 0. BASIC SETUP & GLOBAL STYLE
+# ============================================================
 
-        # Summarizer model
-        self.summarizer_model_name = "sshleifer/distilbart-cnn-12-6"
+st.set_page_config(
+    page_title="MatchAI: Candidate Suitability Screening",
+    page_icon="🔍",
+    layout="wide",
+)
 
-        # NER model (for skills / entities highlighting)
-        self.ner_model_name = "dslim/bert-base-NER"
-
-config = AppConfig()
-
-# ---------------------------------------------------------
-# MODEL LOADING
-# ---------------------------------------------------------
-
-@st.cache_resource(show_spinner=True)
-def load_models_and_pipelines(cfg: AppConfig):
-    sim_model = SentenceTransformer(cfg.sim_model_name)
-    summarizer = pipeline("summarization", model=cfg.summarizer_model_name)
-    ner_pipe = pipeline("ner", model=cfg.ner_model_name, grouped_entities=True)
-    return sim_model, summarizer, ner_pipe
-
-sim_model, summarizer, ner_pipe = load_models_and_pipelines(config)
-
-# ---------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------
-
-def read_uploaded_file(uploaded_file) -> str:
+# Neutral Apple-ish theme: white / light grey only, full-width cards
+st.markdown(
     """
-    Read content from an uploaded file (txt, pdf, docx, etc.).
-    Currently supports txt directly; for pdf/docx, you can extend later.
+    <style>
+    :root {
+        --bg-main: #f5f5f7;
+        --card-bg: #ffffff;
+        --border-subtle: #e5e5ea;
+        --accent-soft: #f0f0f5;
+        --accent-strong: #d1d1d6;
+        --text-main: #1c1c1e;
+        --text-muted: #6e6e73;
+    }
+
+    html, body, [class^="css"]  {
+        font-family: -apple-system, system-ui, BlinkMacSystemFont, "SF Pro Text",
+                     "Helvetica Neue", Arial, sans-serif;
+    }
+
+    .main {
+        background-color: var(--bg-main);
+    }
+
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 1.5rem !important;
+        max-width: 1100px;
+    }
+
+    .round-card {
+        padding: 1.25rem 1.5rem;
+        border-radius: 20px;
+        background-color: var(--card-bg);
+        border: 1px solid var(--border-subtle);
+        box-shadow: 0 16px 35px rgba(0, 0, 0, 0.04);
+        margin-bottom: 1rem;
+    }
+
+    .pill-input textarea,
+    .pill-input .stTextArea textarea,
+    .pill-input .stTextInput input {
+        border-radius: 16px !important;
+        border: 1px solid var(--border-subtle) !important;
+        background-color: #ffffff !important;
+        min-height: 220px !important;
+        padding: 0.9rem 1rem !important;
+        box-shadow: none !important;
+    }
+
+    .pill-upload .stFileUploader {
+        border-radius: 16px !important;
+        border: 1px dashed var(--border-subtle) !important;
+        background-color: #fafafa !important;
+        padding: 0.9rem 1rem !important;
+    }
+
+    .section-title {
+        font-weight: 600;
+        font-size: 1.05rem;
+        margin-bottom: 0.4rem;
+        color: var(--text-main);
+    }
+
+    .soft-label {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+    }
+
+    .muted {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+    }
+
+    .score-number {
+        font-size: 2.1rem;
+        font-weight: 600;
+        color: #111111;
+        margin: 0;
+    }
+
+    .metric-box {
+        padding: 0.85rem 1rem;
+        border-radius: 16px;
+        background: #fafafa;
+        border: 1px solid var(--accent-soft);
+        font-size: 0.9rem;
+    }
+
+    .io-box {
+        border-radius: 16px;
+        background-color: #ffffff;
+        border: 1px solid var(--border-subtle);
+        padding: 0.85rem 1rem;
+        margin-bottom: 0.75rem;
+    }
+
+    /* Buttons */
+    .stButton > button {
+        border-radius: 999px !important;
+        padding: 0.45rem 1.4rem !important;
+        border: 1px solid var(--accent-strong) !important;
+        background: linear-gradient(135deg, #ffffff, #f2f2f7) !important;
+        color: #111111 !important;
+        font-weight: 500 !important;
+        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.06) !important;
+    }
+    .stButton > button:hover {
+        background: linear-gradient(135deg, #ffffff, #e5e5ea) !important;
+        border-color: #c7c7cc !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ============================================================
+# 1. LOAD CONFIG & MODELS
+# ============================================================
+
+@st.cache_resource
+def load_matchai_config(path: str | None = None):
     """
-    if uploaded_file is None:
-        return ""
+    Load matchai_config.json from the same folder as streamlit_app.py
+    so it works both locally and on Streamlit Cloud.
+    """
+    if path is None:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base_dir, "matchai_config.json")
 
-    filename = uploaded_file.name.lower()
-
-    if filename.endswith(".txt"):
-        return uploaded_file.read().decode("utf-8", errors="ignore")
-
-    # Fallback: try to read as text
     try:
-        return uploaded_file.read().decode("utf-8", errors="ignore")
-    except Exception:
-        return ""
+        with open(path, "r") as f:
+            cfg = json.load(f)
+        return cfg
+    except Exception as e:
+        st.error(
+            "Could not load matchai_config.json.\n"
+            f"Using fallback config for demo. Error: {e}"
+        )
+        # Fallback config (2-class SST model – just for pipeline testing)
+        return {
+            "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
+            "summarization_model": "sshleifer/distilbart-cnn-12-6",
+            "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+            "ner_model": "dslim/bert-base-NER",
+            "weights": {
+                "classifier": 0.5,
+                "similarity": 0.3,
+                "keywords": 0.2,
+            },
+            "label_id2name": {
+                "0": "Not Fit",
+                "1": "Good Fit",
+            },
+        }
 
-def compute_similarity_score(resume_text: str, jd_text: str) -> float:
-    """
-    Use sentence-transformers to compute cosine similarity between
-    resume and job description, return percentage [0, 100].
-    """
-    if not resume_text.strip() or not jd_text.strip():
-        return 0.0
+@st.cache_resource
+def load_models_and_pipelines(cfg: dict):
+    clf_id = cfg["fine_tuned_model_id"]
+    clf_tokenizer = AutoTokenizer.from_pretrained(clf_id)
+    clf_model = AutoModelForSequenceClassification.from_pretrained(clf_id)
+    clf_model.to(device)
+    clf_model.eval()
 
-    emb_resume = sim_model.encode(resume_text, convert_to_tensor=True)
-    emb_jd = sim_model.encode(jd_text, convert_to_tensor=True)
-    cos_sim = util.cos_sim(emb_resume, emb_jd).item()
-    # Map from [-1, 1] roughly to [0, 100] (in practice it will be [0, 1])
-    score = max(0.0, min(1.0, (cos_sim + 1) / 2)) * 100
-    return float(score)
-
-def extract_entities(text: str) -> List[str]:
-    if not text.strip():
-        return []
-    ents = ner_pipe(text)
-    out = []
-    for e in ents:
-        val = e.get("word", "").strip()
-        if val and val not in out:
-            out.append(val)
-    return out
-
-def compute_skills_alignment_score(resume_text: str, jd_text: str) -> float:
-    """
-    Very rough proxy: use NER to identify entities/skills in both texts,
-    and compute overlap ratio.
-    """
-    if not resume_text.strip() or not jd_text.strip():
-        return 0.0
-
-    resume_ents = set(extract_entities(resume_text))
-    jd_ents = set(extract_entities(jd_text))
-
-    if not jd_ents:
-        return 50.0  # neutral if JD has no entities detected
-
-    overlap = resume_ents.intersection(jd_ents)
-    ratio = len(overlap) / len(jd_ents)
-    return float(max(0.0, min(1.0, ratio)) * 100)
-
-def compute_experience_alignment_score(resume_text: str, jd_text: str) -> float:
-    """
-    For now, reuse similarity (particularly on experience-like segments).
-    You can refine later (e.g. look for 'experience', 'years', etc.).
-    """
-    return compute_similarity_score(resume_text, jd_text) * 0.9  # slightly down-weighted
-
-def generate_candidate_highlight(resume_text: str, jd_text: str) -> str:
-    """
-    Generate a short, natural-sounding highlight paragraph about the candidate,
-    focusing on difference vs others & real strengths.
-    """
-    base_prompt = (
-        "You are an assistant summarizing a candidate's strengths for a recruiter.\n\n"
-        "Job description:\n"
-        f"{jd_text[:2000]}\n\n"
-        "Candidate resume:\n"
-        f"{resume_text[:4000]}\n\n"
-        "Write 3–5 sentences highlighting:\n"
-        "- What stands out about this candidate vs a typical applicant\n"
-        "- The most relevant experience and skills for THIS job\n"
-        "- Any clear red flags or gaps that the recruiter should note\n\n"
-        "Use natural language, not bullet points. Be concise and specific."
+    summarizer = hf_pipeline(
+        "summarization",
+        model=cfg["summarization_model"],
+        device=0 if torch.cuda.is_available() else -1,
     )
 
-    # Use summarizer to compress this "prompt" (hacky, but works to keep it short).
+    sim_model = SentenceTransformer(cfg["embedding_model"])
+
+    ner_pipe = hf_pipeline("ner", model=cfg["ner_model"], grouped_entities=True)
+
+    raw_map = cfg.get(
+        "label_id2name",
+        {"0": "No Fit", "1": "Potential Fit", "2": "Good Fit"},
+    )
+    label_id2name = {int(k): v for k, v in raw_map.items()}
+
+    return clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name
+
+
+config = load_matchai_config()
+clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name = (
+    load_models_and_pipelines(config)
+)
+
+DEFAULT_WEIGHTS = config.get(
+    "weights", {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2}
+)
+
+# ============================================================
+# 2. HELPER FUNCTIONS (TEXT, MODELS, SCORING)
+# ============================================================
+
+def extract_text_from_pdf(file_bytes: bytes) -> str:
+    try:
+        reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        return text.strip()
+    except Exception as e:
+        st.warning(f"Could not read PDF: {e}")
+        return ""
+
+def extract_text_from_docx(file_bytes: bytes) -> str:
+    try:
+        with io.BytesIO(file_bytes) as f:
+            text = docx2txt.process(f)
+        return (text or "").strip()
+    except Exception as e:
+        st.warning(f"Could not read Word file: {e}")
+        return ""
+
+def summarize_text(text: str, max_len: int = 150) -> str:
+    if not text or not isinstance(text, str):
+        return ""
+    truncated = text[:2000]
     try:
         out = summarizer(
-            base_prompt,
-            max_length=180,
-            min_length=90,
+            truncated,
+            max_length=max_len,
+            min_length=40,
             do_sample=False,
-        )
-        text = out[0]["summary_text"].strip()
-        return text
-    except Exception:
-        # Fallback simple heuristic
-        return (
-            "This candidate appears to have several relevant experiences and skills for the role. "
-            "They demonstrate exposure to key responsibilities in the job description and have a track record "
-            "of delivering results in related areas. There may still be gaps compared with an ideal profile, "
-            "so the recruiter should review their experience depth and recency in more detail."
-        )
+        )[0]["summary_text"]
+        return out
+    except Exception as e:
+        st.warning(f"Summarisation issue: {e}")
+        return truncated[:300]
 
-def compute_weighted_score(
-    similarity_score: float,
-    skills_score: float,
-    experience_score: float,
-    weights: Dict[str, float],
-) -> Tuple[float, Dict[str, float]]:
+def compute_similarity(text1: str, text2: str) -> float:
+    if not text1 or not text2:
+        return 0.0
+    emb1 = sim_model.encode(text1, convert_to_tensor=True)
+    emb2 = sim_model.encode(text2, convert_to_tensor=True)
+    sim = cosine_similarity(emb1, emb2, dim=0).item()
+    return float(sim)
+
+def extract_entities(text: str):
+    if not text or not isinstance(text, str):
+        return {"ORG": [], "PER": [], "LOC": []}
+    ents = ner_pipe(text[:1000])
+    result = {"ORG": [], "PER": [], "LOC": []}
+    for e in ents:
+        label = e.get("entity_group")
+        word = e.get("word", "").strip()
+        if label in result and word:
+            result[label].append(word)
+    return result
+
+def predict_fit_label(jd_text: str, res_text: str):
+    combined = res_text + " [SEP] " + jd_text
+    inputs = clf_tokenizer(
+        combined,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
+    ).to(device)
+
+    with torch.no_grad():
+        outputs = clf_model(**inputs)
+        probs = softmax(outputs.logits, dim=-1).cpu().numpy()[0]
+
+    pred_id = int(np.argmax(probs))
+    return {
+        "label_id": pred_id,
+        "label_name": label_id2name.get(pred_id, f"Class {pred_id}"),
+        "probs": probs.tolist(),
+    }
+
+def process_job_description(jd_text: str):
+    summary = summarize_text(jd_text)
+    keywords = list({w.lower() for w in summary.split() if len(w) > 4})
+    return {"raw": jd_text, "summary": summary, "keywords": keywords}
+
+def process_resume(res_text: str):
+    summary = summarize_text(res_text)
+    entities = extract_entities(res_text)
+    return {"raw": res_text, "summary": summary, "entities": entities}
+
+def keyword_match_score(jd_keywords, resume_summary: str) -> float:
+    if not jd_keywords:
+        return 0.0
+    resume_words = set(w.lower() for w in resume_summary.split())
+    hits = sum(1 for kw in jd_keywords if kw in resume_words)
+    return hits / len(jd_keywords)
+
+# === NEW, IMPROVED HIGHLIGHT FUNCTION =======================
+
+def generate_candidate_highlights(result_dict: dict) -> str:
     """
-    Weighted overall score based on user-selected weights.
-    weights keys: 'similarity', 'skills', 'experience'
+    Produce a short, natural summary that gives HR an immediate feel for:
+    - overall fit,
+    - what the candidate is strong at,
+    - where they might be weaker.
     """
-    w_sim = weights.get("similarity", 40.0)
-    w_skill = weights.get("skills", 35.0)
-    w_exp = weights.get("experience", 25.0)
+    label = result_dict["fit"]["label_name"]
+    score = result_dict["final_score"]
+    score_pct = score * 100
+    sim = result_dict["similarity"]
+    kw = result_dict["keyword_score"]
 
-    total_weight = w_sim + w_skill + w_exp
-    if total_weight == 0:
-        # Avoid division by zero; use equal weights if user sets everything to 0
-        w_sim = w_skill = w_exp = 1
-        total_weight = 3
+    ents = result_dict["resume"]["entities"]
+    orgs = ents.get("ORG", [])
 
-    # Normalize to sum to 1 internally
-    sim_norm = w_sim / total_weight
-    skill_norm = w_skill / total_weight
-    exp_norm = w_exp / total_weight
+    # Clean and deduplicate organisation names a bit
+    cleaned_orgs = []
+    for o in orgs:
+        o_clean = o.strip(",.;: ").title()
+        if 2 < len(o_clean) <= 40:  # avoid obvious junk / very short tokens
+            cleaned_orgs.append(o_clean)
+    cleaned_orgs = list(dict.fromkeys(cleaned_orgs))[:3]
 
-    overall = (
-        similarity_score * sim_norm
-        + skills_score * skill_norm
-        + experience_score * exp_norm
-    )
+    # JD keywords actually present in resume summary
+    jd_keywords = result_dict["jd"]["keywords"]
+    resume_words = set(w.lower().strip(",.!?;:") for w in result_dict["resume"]["summary"].split())
+    matched_keywords = [kwd for kwd in jd_keywords if kwd in resume_words][:5]
 
-    contributions = {
-        "similarity": similarity_score * sim_norm,
-        "skills": skills_score * skill_norm,
-        "experience": experience_score * exp_norm,
-    }
+    lines = []
 
-    return float(overall), contributions
-
-def init_session_state():
-    defaults = {
-        "resume_text": "",
-        "jd_text": "",
-        "similarity_score": None,
-        "skills_score": None,
-        "experience_score": None,
-        "overall_score": None,
-        "score_contributions": None,
-        "highlight": None,
-        "weights": {
-            "similarity": 40.0,
-            "skills": 35.0,
-            "experience": 25.0,
-        },
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-# ---------------------------------------------------------
-# UI
-# ---------------------------------------------------------
-
-def main():
-    st.set_page_config(
-        page_title="MatchAI – Resume & Job Description Matching",
-        layout="centered",
-    )
-
-    init_session_state()
-
-    st.title("MatchAI – Resume & Job Description Matching")
-
-    st.markdown(
-        """
-        Upload a **resume** and a **job description** to get:
-        - A single **overall match score** (0–100)
-        - Breakdown by **similarity**, **skills alignment**, and **experience**
-        - A concise **candidate highlight** for recruiters
-        """
-    )
-
-    # -----------------------------------------------------
-    # INPUT SECTION
-    # -----------------------------------------------------
-    st.header("1. Inputs")
-
-    # --- File uploaders ---
-    resume_file = st.file_uploader("Upload Resume (txt preferred)", type=["txt", "pdf", "docx"], key="resume_file")
-    jd_file = st.file_uploader("Upload Job Description (txt preferred)", type=["txt", "pdf", "docx"], key="jd_file")
-
-    st.markdown("Or paste text directly below:")
-
-    col_text = st.container()
-    with col_text:
-        st.session_state.resume_text = st.text_area(
-            "Resume text",
-            value=st.session_state.resume_text,
-            height=180,
-            key="resume_text_area",
-        )
-        st.session_state.jd_text = st.text_area(
-            "Job description text",
-            value=st.session_state.jd_text,
-            height=180,
-            key="jd_text_area",
-        )
-
-    # If files are uploaded, they override text areas
-    if resume_file is not None:
-        st.session_state.resume_text = read_uploaded_file(resume_file)
-    if jd_file is not None:
-        st.session_state.jd_text = read_uploaded_file(jd_file)
-
-    # -----------------------------------------------------
-    # WEIGHTS
-    # -----------------------------------------------------
-    st.header("2. Adjust scoring weights (optional)")
-
-    st.markdown(
-        "Weights determine how much each component contributes to the final score. "
-        "Total **must not exceed 100%**."
-    )
-
-    w_sim = st.slider(
-        "Weight – Similarity (resume vs JD)",
-        min_value=0,
-        max_value=100,
-        value=int(st.session_state.weights["similarity"]),
-        step=5,
-        key="w_sim_slider",
-    )
-    w_skill = st.slider(
-        "Weight – Skills alignment",
-        min_value=0,
-        max_value=100,
-        value=int(st.session_state.weights["skills"]),
-        step=5,
-        key="w_skill_slider",
-    )
-    w_exp = st.slider(
-        "Weight – Experience alignment",
-        min_value=0,
-        max_value=100,
-        value=int(st.session_state.weights["experience"]),
-        step=5,
-        key="w_exp_slider",
-    )
-
-    total_weight = w_sim + w_skill + w_exp
-    st.session_state.weights = {
-        "similarity": float(w_sim),
-        "skills": float(w_skill),
-        "experience": float(w_exp),
-    }
-
-    if total_weight > 100:
-        st.error(
-            f"Total weight is **{total_weight}%** – it must be **≤ 100%**. "
-            "Please reduce one or more sliders."
-        )
-
-    elif total_weight < 100:
-        st.info(
-            f"Total weight is currently **{total_weight}%**. "
-            "The model will internally normalise them to 100%, "
-            "but you still have **{100 - total_weight}%** unallocated if you want full usage."
-        )
+    # 1) Overall fit sentence
+    if label.lower().startswith("good") and score_pct >= 80:
+        lines.append(f"Overall this profile looks like a strong match for the role ({score_pct:.0f}% suitability).")
+    elif "potential" in label.lower() or (label.lower().startswith("good") and score_pct < 80):
+        lines.append(f"Overall this profile appears to be a partial but promising match ({score_pct:.0f}% suitability).")
     else:
-        st.success("Total weight = **100%** ✅")
+        lines.append(f"Overall this profile appears to be a weaker match at this stage ({score_pct:.0f}% suitability).")
 
-    with st.expander("How is the score calculated?"):
-        st.markdown(
-            """
-            **Components:**
-            - **Similarity**: semantic similarity between the full resume and job description.
-            - **Skills alignment**: overlap between named entities/skills detected in the resume vs the job description.
-            - **Experience alignment**: experience-flavoured similarity signal derived from the same semantic model.
+    # 2) Strengths / specifics
+    strengths = []
 
-            Scores are combined as:
+    # Semantic overlap
+    if sim >= 0.80:
+        strengths.append(f"the resume is very close to the job description in content (similarity {sim:.2f})")
+    elif sim >= 0.65:
+        strengths.append(f"there is some solid overlap with the role responsibilities (similarity {sim:.2f})")
 
-            `overall = w_similarity * similarity + w_skills * skills + w_experience * experience`
-
-            where the weights `w_*` are your sliders, normalised to sum to 1.
-            """
+    # Keyword coverage
+    if matched_keywords and kw >= 0.55:
+        strengths.append(
+            "it directly references key requirements such as "
+            + ", ".join(matched_keywords)
+        )
+    elif matched_keywords:
+        strengths.append(
+            "it touches on several relevant requirements (e.g. "
+            + ", ".join(matched_keywords)
+            + ")"
         )
 
-    # -----------------------------------------------------
-    # ACTION BUTTONS
-    # -----------------------------------------------------
-    st.header("3. Actions")
+    # Organisations
+    if cleaned_orgs:
+        strengths.append(
+            "the candidate has experience with organisations such as "
+            + ", ".join(cleaned_orgs)
+        )
 
-    col_buttons = st.columns([1, 1, 1])
-    with col_buttons[0]:
-        run_btn = st.button("🔎 Run matching")
-    with col_buttons[1]:
-        clear_inputs_btn = st.button("🧹 Clear inputs")
-    with col_buttons[2]:
-        clear_outputs_btn = st.button("🧼 Clear outputs")
+    if strengths:
+        lines.append("Key signals from the model indicate that " + "; ".join(strengths) + ".")
+    else:
+        lines.append(
+            "The automated checks do not highlight any obvious strengths, so manual review is recommended, especially for softer skills and potential."
+        )
 
-    # --- Clear inputs ---
-    if clear_inputs_btn:
-        st.session_state.resume_text = ""
-        st.session_state.jd_text = ""
-        st.session_state["resume_file"] = None
-        st.session_state["jd_file"] = None
-        # Also clear outputs for consistency
-        st.session_state.similarity_score = None
-        st.session_state.skills_score = None
-        st.session_state.experience_score = None
-        st.session_state.overall_score = None
-        st.session_state.score_contributions = None
-        st.session_state.highlight = None
-        st.rerun()
+    return " ".join(lines)
 
-    # --- Clear outputs only ---
-    if clear_outputs_btn:
-        st.session_state.similarity_score = None
-        st.session_state.skills_score = None
-        st.session_state.experience_score = None
-        st.session_state.overall_score = None
-        st.session_state.score_contributions = None
-        st.session_state.highlight = None
-        st.rerun()
+# ============================================================
 
-    # -----------------------------------------------------
-    # RUN MATCHING
-    # -----------------------------------------------------
-    if run_btn:
-        if not st.session_state.resume_text.strip() or not st.session_state.jd_text.strip():
-            st.warning("Please provide both resume and job description (via upload or text).")
-        elif total_weight > 100:
-            st.error("Please fix the weights so total is ≤ 100% before running.")
+def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
+    jd = process_job_description(jd_text)
+    res = process_resume(res_text)
+
+    sim_raw = compute_similarity(jd["summary"], res["summary"])
+    sim_norm = (sim_raw + 1) / 2 if sim_raw < 1 else min(sim_raw, 1.0)
+
+    kw_score = keyword_match_score(jd["keywords"], res["summary"])
+
+    fit = predict_fit_label(jd_text, res_text)
+    if len(fit["probs"]) >= 3:
+        prob_good_fit = fit["probs"][2]
+    else:
+        prob_good_fit = fit["probs"][fit["label_id"]]
+
+    final_score = (
+        weights["classifier"] * prob_good_fit
+        + weights["similarity"] * sim_norm
+        + weights["keywords"] * kw_score
+    )
+
+    result = {
+        "jd": jd,
+        "resume": res,
+        "similarity_raw": sim_raw,
+        "similarity": sim_norm,
+        "keyword_score": kw_score,
+        "fit": fit,
+        "prob_good_fit": float(prob_good_fit),
+        "final_score": float(final_score),
+    }
+    result["highlight"] = generate_candidate_highlights(result)
+    return result
+
+def evaluate_batch(jd_text: str, resumes_list: list, weights: dict):
+    results = []
+    for item in resumes_list:
+        name = item.get("name", "Unknown")
+        text = item.get("text", "")
+        if not text:
+            continue
+        r = evaluate_candidate(jd_text, text, weights)
+        r["file_name"] = name
+        results.append(r)
+    results_sorted = sorted(results, key=lambda x: x["final_score"], reverse=True)
+    return results_sorted
+
+def map_priority(score: float) -> str:
+    if score >= 0.8:
+        return "Interview priority: HIGH"
+    elif score >= 0.6:
+        return "Interview priority: MEDIUM"
+    else:
+        return "Interview priority: LOW"
+
+def clear_all_inputs():
+    for key in ["jd_text", "resume_text", "uploaded_files"]:
+        if key in st.session_state:
+            del st.session_state[key]
+
+# ============================================================
+# 3. HEADER
+# ============================================================
+
+st.title("🔍 MatchAI: Candidate Suitability Screening")
+st.markdown(
+    "<span class='muted'>Screen and prioritise candidates against a specific job description.</span>",
+    unsafe_allow_html=True,
+)
+
+# ============================================================
+# 4. INPUTS CARD (FULL-WIDTH ROW)
+# ============================================================
+
+with st.container():
+    st.markdown("<div class='round-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='soft-label'>INPUTS</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='section-title'>Job description</div>", unsafe_allow_html=True)
+    st.markdown("<div class='io-box pill-input'>", unsafe_allow_html=True)
+    jd_text = st.text_area(
+        "",
+        key="jd_text",
+        height=230,
+        placeholder="Paste the job description here...",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='section-title'>Candidate resumes</div>", unsafe_allow_html=True)
+    c_mode, c_hint = st.columns([0.45, 0.55])
+    with c_mode:
+        mode = st.radio(
+            "Mode",
+            ["Single candidate", "Batch (multiple resumes)"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="mode",
+        )
+    with c_hint:
+        if mode == "Single candidate":
+            st.markdown(
+                "<div class='muted' style='margin-top:0.3rem;'>Upload a file or paste the resume text.</div>",
+                unsafe_allow_html=True,
+            )
         else:
-            with st.spinner("Calculating match score..."):
-                sim_score = compute_similarity_score(
-                    st.session_state.resume_text,
-                    st.session_state.jd_text,
-                )
-                skills_score = compute_skills_alignment_score(
-                    st.session_state.resume_text,
-                    st.session_state.jd_text,
-                )
-                exp_score = compute_experience_alignment_score(
-                    st.session_state.resume_text,
-                    st.session_state.jd_text,
-                )
-
-                overall, contrib = compute_weighted_score(
-                    sim_score,
-                    skills_score,
-                    exp_score,
-                    st.session_state.weights,
-                )
-
-                highlight = generate_candidate_highlight(
-                    st.session_state.resume_text,
-                    st.session_state.jd_text,
-                )
-
-                st.session_state.similarity_score = sim_score
-                st.session_state.skills_score = skills_score
-                st.session_state.experience_score = exp_score
-                st.session_state.overall_score = overall
-                st.session_state.score_contributions = contrib
-                st.session_state.highlight = highlight
-
-            st.success("Matching completed!")
-
-    # -----------------------------------------------------
-    # OUTPUTS
-    # -----------------------------------------------------
-    st.header("4. Results")
-
-    if st.session_state.overall_score is not None:
-        st.subheader(f"Overall match score: **{st.session_state.overall_score:.1f} / 100**")
-
-        col_scores = st.columns(3)
-        with col_scores[0]:
-            st.metric("Similarity", f"{st.session_state.similarity_score:.1f}")
-        with col_scores[1]:
-            st.metric("Skills alignment", f"{st.session_state.skills_score:.1f}")
-        with col_scores[2]:
-            st.metric("Experience alignment", f"{st.session_state.experience_score:.1f}")
-
-        if st.session_state.score_contributions:
-            st.markdown("**Weighted contributions (after normalisation):**")
-            st.write(
-                {
-                    "Similarity": round(st.session_state.score_contributions["similarity"], 2),
-                    "Skills": round(st.session_state.score_contributions["skills"], 2),
-                    "Experience": round(st.session_state.score_contributions["experience"], 2),
-                }
+            st.markdown(
+                "<div class='muted' style='margin-top:0.3rem;'>Upload multiple resumes (max 30 per batch). PDFs, Word, or text.</div>",
+                unsafe_allow_html=True,
             )
 
-        st.subheader("Candidate highlight")
-        st.write(st.session_state.highlight)
+    if mode == "Single candidate":
+        st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+        st.markdown("<div class='pill-upload'>", unsafe_allow_html=True)
+        uploaded_file = st.file_uploader(
+            "Upload resume (PDF / Word / TXT, optional)",
+            type=["pdf", "docx", "txt"],
+            accept_multiple_files=False,
+            label_visibility="collapsed",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='pill-input'>", unsafe_allow_html=True)
+        resume_text = st.text_area(
+            "",
+            key="resume_text",
+            height=220,
+            placeholder="Paste resume text here...",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if uploaded_file is not None:
+            if uploaded_file.type == "application/pdf":
+                extracted = extract_text_from_pdf(uploaded_file.read())
+            elif uploaded_file.type in [
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/msword",
+            ]:
+                extracted = extract_text_from_docx(uploaded_file.read())
+            else:
+                extracted = uploaded_file.read().decode("utf-8", errors="ignore")
+
+            if extracted and not resume_text.strip():
+                st.session_state["resume_text"] = extracted
+                resume_text = extracted
+                st.info(f"Text extracted from: {uploaded_file.name[:40]}")
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
     else:
-        st.info("Run the matching to see scores and highlight.")
+        st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+        MAX_RESUMES = 30
+        st.markdown("<div class='pill-upload'>", unsafe_allow_html=True)
+        uploaded_files = st.file_uploader(
+            "Upload multiple resumes",
+            type=["pdf", "docx", "txt"],
+            accept_multiple_files=True,
+            key="uploaded_files",
+            label_visibility="collapsed",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    st.caption("Tip: You can tweak the weights, rerun, and compare how the overall score changes.")
+        if uploaded_files and len(uploaded_files) > MAX_RESUMES:
+            st.error(f"Too many files uploaded – maximum {MAX_RESUMES} per batch.")
 
-if __name__ == "__main__":
-    main()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Clear button – aligned to left within the card
+    clear_col, _ = st.columns([0.2, 0.8])
+    with clear_col:
+        if st.button("Clear inputs"):
+            clear_all_inputs()
+            st.experimental_rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ============================================================
+# 5. EVALUATION & RESULTS CARD (FULL-WIDTH ROW)
+# ============================================================
+
+with st.container():
+    st.markdown("<div class='round-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='soft-label'>EVALUATION</div>", unsafe_allow_html=True)
+
+    top_row = st.columns([0.5, 0.5])
+    with top_row[0]:
+        st.markdown("<div class='section-title'>MatchAI score</div>", unsafe_allow_html=True)
+    with top_row[1]:
+        with st.expander("ℹ️  How is the score calculated?", expanded=False):
+            st.write(
+                "The final suitability score combines three signals:\n"
+                "- **P(Good Fit)** from the fine-tuned classifier\n"
+                "- **Semantic similarity** between JD and resume summaries\n"
+                "- **Keyword coverage** of JD terms in the resume\n\n"
+                "Default formula:\n"
+                "**Final Score = 0.5 × P(Good Fit) + 0.3 × Similarity + 0.2 × Keyword Coverage**.\n\n"
+                "Weights can be adjusted below to reflect different HR priorities."
+            )
+
+    # Weights expander – close to score explanation
+    with st.expander("Adjust scoring weights (optional)"):
+        st.caption("Weights are normalised automatically. Reset to return to defaults.")
+
+        if "w_clf" not in st.session_state:
+            st.session_state.w_clf = DEFAULT_WEIGHTS["classifier"]
+        if "w_sim" not in st.session_state:
+            st.session_state.w_sim = DEFAULT_WEIGHTS["similarity"]
+        if "w_kw" not in st.session_state:
+            st.session_state.w_kw = DEFAULT_WEIGHTS["keywords"]
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            w_clf = st.slider(
+                "Weight: P(Good Fit)",
+                0.0,
+                1.0,
+                float(st.session_state.w_clf),
+                0.05,
+            )
+        with c2:
+            w_sim = st.slider(
+                "Weight: Similarity",
+                0.0,
+                1.0,
+                float(st.session_state.w_sim),
+                0.05,
+            )
+        with c3:
+            w_kw = st.slider(
+                "Weight: Keywords",
+                0.0,
+                1.0,
+                float(st.session_state.w_kw),
+                0.05,
+            )
+
+        total = w_clf + w_sim + w_kw
+        if total == 0:
+            weights = {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2}
+        else:
+            weights = {
+                "classifier": w_clf / total,
+                "similarity": w_sim / total,
+                "keywords": w_kw / total,
+            }
+
+        st.caption(
+            f"Normalised weights →  P(Good Fit): {weights['classifier']:.2f},  "
+            f"Similarity: {weights['similarity']:.2f},  Keywords: {weights['keywords']:.2f}"
+        )
+
+        if st.button("Reset to default weights"):
+            st.session_state.w_clf = DEFAULT_WEIGHTS["classifier"]
+            st.session_state.w_sim = DEFAULT_WEIGHTS["similarity"]
+            st.session_state.w_kw = DEFAULT_WEIGHTS["keywords"]
+            st.experimental_rerun()
+
+    # Safety: if expander not opened yet, ensure weights exist
+    if "weights" not in locals():
+        weights = DEFAULT_WEIGHTS
+
+    st.markdown("---")
+
+    # Score buttons – near top of evaluation card
+    button_row = st.columns([0.35, 0.35, 0.3])
+    with button_row[0]:
+        single_btn = st.button("🔍 Score single candidate")
+    with button_row[1]:
+        batch_btn = st.button("🔍 Score candidates (batch)")
+
+    # ---------------- SINGLE MODE RESULT ----------------
+    if single_btn:
+        jd_val = st.session_state.get("jd_text", "")
+        resume_val = st.session_state.get("resume_text", "")
+
+        if not jd_val.strip():
+            st.error("Please provide a job description in the Inputs section.")
+        elif not resume_val.strip():
+            st.error("Please provide resume text or upload a file in the Inputs section.")
+        else:
+            with st.spinner("Evaluating candidate..."):
+                result = evaluate_candidate(jd_val, resume_val, weights)
+
+            score = result["final_score"]
+            score_pct = score * 100
+            label = result["fit"]["label_name"]
+            prob_good = result["prob_good_fit"]
+
+            st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+            st.markdown("<div class='section-title'>Result – Single candidate</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<p class='soft-label'>Final suitability score</p>"
+                f"<p class='score-number'>{score_pct:.1f}%</p>",
+                unsafe_allow_html=True,
+            )
+            st.write(f"**Predicted fit label:** {label}")
+            st.write(f"**P(Good Fit):** {prob_good:.2f}")
+            st.write(f"**{map_priority(score)}**")
+            st.write(f"**Highlight:** {result['highlight']}")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
+                st.write("**Semantic similarity**")
+                st.write(f"{result['similarity']:.3f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with m2:
+                st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
+                st.write("**Keyword coverage**")
+                st.write(f"{result['keyword_score']:.3f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with m3:
+                st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
+                st.write("**Model fit confidence**")
+                st.write(f"{prob_good:.3f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            with st.expander("Model-driven details"):
+                st.write("**JD summary**")
+                st.write(result["jd"]["summary"])
+                st.write("**Resume summary**")
+                st.write(result["resume"]["summary"])
+                st.write("**Extracted organisations (top 5)**")
+                st.write(result["resume"]["entities"].get("ORG", [])[:5])
+
+    # ---------------- BATCH MODE RESULT ----------------
+    if batch_btn:
+        jd_val = st.session_state.get("jd_text", "")
+        uploaded_files_val = st.session_state.get("uploaded_files", None)
+
+        if not jd_val.strip():
+            st.error("Please provide a job description in the Inputs section.")
+        elif not uploaded_files_val:
+            st.error("Please upload at least one resume file in the Inputs section.")
+        else:
+            resumes_list = []
+            for f in uploaded_files_val:
+                if f.type == "application/pdf":
+                    text = extract_text_from_pdf(f.read())
+                elif f.type in [
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/msword",
+                ]:
+                    text = extract_text_from_docx(f.read())
+                else:
+                    text = f.read().decode("utf-8", errors="ignore")
+
+                if text.strip():
+                    resumes_list.append({"name": f.name, "text": text})
+
+            if not resumes_list:
+                st.error("No readable text found in uploaded resumes.")
+            else:
+                with st.spinner("Evaluating all candidates..."):
+                    batch_results = evaluate_batch(jd_val, resumes_list, weights)
+
+                st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+                st.markdown("<div class='section-title'>Result – Batch candidate ranking</div>", unsafe_allow_html=True)
+
+                rows = []
+                for rank, r in enumerate(batch_results, start=1):
+                    rows.append(
+                        {
+                            "Rank": rank,
+                            "File": r.get("file_name", f"Candidate {rank}"),
+                            "Fit label": r["fit"]["label_name"],
+                            "Final score (%)": round(r["final_score"] * 100, 1),
+                            "P(Good Fit)": round(r["prob_good_fit"], 3),
+                            "Similarity": round(r["similarity"], 3),
+                            "Keyword score": round(r["keyword_score"], 3),
+                        }
+                    )
+
+                st.dataframe(rows, use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                top = batch_results[0]
+                st.markdown("<div class='section-title'>Top candidate highlight</div>", unsafe_allow_html=True)
+                st.write(f"**File:** {top.get('file_name', 'N/A')}")
+                st.write(f"**Final score:** {top['final_score']*100:.1f}%")
+                st.write(f"**Fit label:** {top['fit']['label_name']}")
+                st.write(f"**Highlight:** {top['highlight']}")
+
+                with st.expander("View all candidate highlights"):
+                    for r in batch_results:
+                        st.markdown(f"**{r.get('file_name', 'Candidate')}**")
+                        st.write(
+                            f"- Final score: {r['final_score']*100:.1f}% "
+                            f"(label: {r['fit']['label_name']})"
+                        )
+                        st.write(f"- Highlight: {r['highlight']}")
+                        st.write("---")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ============================================================
+# END
+# ============================================================
