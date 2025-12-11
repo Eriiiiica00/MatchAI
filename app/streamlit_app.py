@@ -67,7 +67,6 @@ def load_matchai_config(path: str | None = None):
     Load matchai_config.json from the same folder as streamlit_app.py
     so it works both locally and on Streamlit Cloud.
     """
-    # If no path passed, build it relative to this file
     if path is None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         path = os.path.join(base_dir, "matchai_config.json")
@@ -77,10 +76,14 @@ def load_matchai_config(path: str | None = None):
             cfg = json.load(f)
         return cfg
     except Exception as e:
-        st.error(f"Could not load matchai_config.json at: {path}\nUsing fallback config. Error: {e}")
-        # Fallback config (adjust IDs if needed)
+        st.error(
+            f"Could not load matchai_config.json at: {path}\n"
+            f"Using fallback config. Error: {e}"
+        )
+        # Fallback config (testing-only defaults)
         return {
-            "fine_tuned_model_id": "your-username/matchai-fit-classifier",
+            # Placeholder classifier until your fine-tuned model is uploaded
+            "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
             "summarization_model": "sshleifer/distilbart-cnn-12-6",
             "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
             "ner_model": "dslim/bert-base-NER",
@@ -96,40 +99,79 @@ def load_matchai_config(path: str | None = None):
             },
         }
 
+
 @st.cache_resource
 def load_models_and_pipelines(cfg: dict):
-    # Classifier
-    clf_id = cfg["fine_tuned_model_id"]
-    clf_tokenizer = AutoTokenizer.from_pretrained(clf_id)
-    clf_model = AutoModelForSequenceClassification.from_pretrained(clf_id)
-    clf_model.to(device)
-    clf_model.eval()
+    """
+    Load classifier, summariser, embedding model, and NER pipeline.
+    If anything fails (e.g. wrong HF ID), show a clear error and stop.
+    """
+    try:
+        # ---- Classifier ----
+        clf_id = cfg.get(
+            "fine_tuned_model_id",
+            "distilbert-base-uncased-finetuned-sst-2-english",
+        )
+        clf_tokenizer = AutoTokenizer.from_pretrained(clf_id)
+        clf_model = AutoModelForSequenceClassification.from_pretrained(clf_id)
+        clf_model.to(device)
+        clf_model.eval()
 
-    # Summarizer
-    summarizer = hf_pipeline(
-        "summarization",
-        model=cfg["summarization_model"],
-        device=0 if torch.cuda.is_available() else -1,
-    )
+        # ---- Summariser ----
+        summarizer_id = cfg.get(
+            "summarization_model",
+            "sshleifer/distilbart-cnn-12-6",
+        )
+        summarizer = hf_pipeline(
+            "summarization",
+            model=summarizer_id,
+            device=0 if torch.cuda.is_available() else -1,
+        )
 
-    # Embedding model
-    sim_model = SentenceTransformer(cfg["embedding_model"])
+        # ---- Embedding model ----
+        embedding_id = cfg.get(
+            "embedding_model",
+            "sentence-transformers/all-MiniLM-L6-v2",
+        )
+        sim_model = SentenceTransformer(embedding_id)
 
-    # NER pipeline
-    ner_pipe = hf_pipeline(
-        "ner", model=cfg["ner_model"], grouped_entities=True
-    )
+        # ---- NER pipeline ----
+        ner_id = cfg.get("ner_model", "dslim/bert-base-NER")
+        ner_pipe = hf_pipeline(
+            "ner",
+            model=ner_id,
+            grouped_entities=True,
+        )
 
-    # Label mapping
-    raw_map = cfg.get("label_id2name", {"0": "No Fit", "1": "Potential Fit", "2": "Good Fit"})
-    label_id2name = {int(k): v for k, v in raw_map.items()}
+        # ---- Label mapping ----
+        raw_map = cfg.get(
+            "label_id2name",
+            {"0": "No Fit", "1": "Potential Fit", "2": "Good Fit"},
+        )
+        label_id2name = {int(k): v for k, v in raw_map.items()}
 
-    return clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name
+        return clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name
+
+    except Exception as e:
+        st.error(
+            "❌ Error while loading MatchAI models.\n\n"
+            f"- Classifier ID: `{cfg.get('fine_tuned_model_id')}`\n"
+            f"- Summariser ID: `{cfg.get('summarization_model')}`\n"
+            f"- Embedding ID: `{cfg.get('embedding_model')}`\n"
+            f"- NER ID: `{cfg.get('ner_model')}`\n\n"
+            f"Technical detail: {e}"
+        )
+        st.stop()
+
 
 config = load_matchai_config()
-clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name = load_models_and_pipelines(config)
+clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name = (
+    load_models_and_pipelines(config)
+)
 
-DEFAULT_WEIGHTS = config.get("weights", {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2})
+DEFAULT_WEIGHTS = config.get(
+    "weights", {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2}
+)
 
 # ============================================================
 # 2. HELPER FUNCTIONS (TEXT, MODELS, SCORING)
@@ -146,6 +188,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         st.warning(f"Could not read PDF: {e}")
         return ""
 
+
 def extract_text_from_docx(file_bytes: bytes) -> str:
     try:
         with io.BytesIO(file_bytes) as f:
@@ -154,6 +197,7 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
     except Exception as e:
         st.warning(f"Could not read Word file: {e}")
         return ""
+
 
 def summarize_text(text: str, max_len: int = 150) -> str:
     if not text or not isinstance(text, str):
@@ -171,6 +215,7 @@ def summarize_text(text: str, max_len: int = 150) -> str:
         st.warning(f"Summarisation issue: {e}")
         return truncated[:300]
 
+
 def compute_similarity(text1: str, text2: str) -> float:
     if not text1 or not text2:
         return 0.0
@@ -178,6 +223,7 @@ def compute_similarity(text1: str, text2: str) -> float:
     emb2 = sim_model.encode(text2, convert_to_tensor=True)
     sim = cosine_similarity(emb1, emb2, dim=0).item()
     return float(sim)
+
 
 def extract_entities(text: str):
     if not text or not isinstance(text, str):
@@ -190,6 +236,7 @@ def extract_entities(text: str):
         if label in result and word:
             result[label].append(word)
     return result
+
 
 def predict_fit_label(jd_text: str, res_text: str):
     combined = res_text + " [SEP] " + jd_text
@@ -211,15 +258,18 @@ def predict_fit_label(jd_text: str, res_text: str):
         "probs": probs.tolist(),
     }
 
+
 def process_job_description(jd_text: str):
     summary = summarize_text(jd_text)
     keywords = list({w.lower() for w in summary.split() if len(w) > 4})
     return {"raw": jd_text, "summary": summary, "keywords": keywords}
 
+
 def process_resume(res_text: str):
     summary = summarize_text(res_text)
     entities = extract_entities(res_text)
     return {"raw": res_text, "summary": summary, "entities": entities}
+
 
 def keyword_match_score(jd_keywords, resume_summary: str) -> float:
     if not jd_keywords:
@@ -227,6 +277,7 @@ def keyword_match_score(jd_keywords, resume_summary: str) -> float:
     resume_words = set(w.lower() for w in resume_summary.split())
     hits = sum(1 for kw in jd_keywords if kw in resume_words)
     return hits / len(jd_keywords)
+
 
 def generate_candidate_highlights(result_dict: dict) -> str:
     label = result_dict["fit"]["label_name"]
@@ -283,6 +334,7 @@ def generate_candidate_highlights(result_dict: dict) -> str:
     sentence = "This candidate shows " + " ".join(strength_bits)
     return sentence.strip()
 
+
 def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
     jd = process_job_description(jd_text)
     res = process_resume(res_text)
@@ -317,6 +369,7 @@ def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
     result["highlight"] = generate_candidate_highlights(result)
     return result
 
+
 def evaluate_batch(jd_text: str, resumes_list: list, weights: dict):
     """
     resumes_list: list of dicts [{"name": "...", "text": "..."}, ...]
@@ -333,6 +386,7 @@ def evaluate_batch(jd_text: str, resumes_list: list, weights: dict):
     results_sorted = sorted(results, key=lambda x: x["final_score"], reverse=True)
     return results_sorted
 
+
 def map_priority(score: float) -> str:
     if score >= 0.8:
         return "Interview Priority: HIGH"
@@ -340,6 +394,7 @@ def map_priority(score: float) -> str:
         return "Interview Priority: MEDIUM"
     else:
         return "Interview Priority: LOW"
+
 
 # ============================================================
 # 3. UI LAYOUT
@@ -354,7 +409,7 @@ st.write(
 )
 
 st.markdown(
-    """
+    r"""
     **Final Suitability Score Formula**  
     \(Final Score = 0.5 × P(Good Fit) + 0.3 × Similarity + 0.2 × Keyword Coverage\)  
     The weights can be adjusted to reflect different HR priorities.
@@ -424,6 +479,7 @@ with col_right:
             )
             st.stop()
 
+
 # ============================================================
 # 4. ADVANCED: WEIGHTS
 # ============================================================
@@ -484,6 +540,7 @@ with st.expander("Advanced: adjust scoring weights"):
         st.session_state.w_sim = DEFAULT_WEIGHTS["similarity"]
         st.session_state.w_kw = DEFAULT_WEIGHTS["keywords"]
         st.experimental_rerun()
+
 
 # ============================================================
 # 5. RUN EVALUATION
