@@ -75,43 +75,11 @@ st.markdown(
         box-shadow: none !important;
     }
 
-    .io-box {
-        border-radius: 16px;
-        background-color: #ffffff;
-        border: 1px solid var(--border-subtle);
-        padding: 0.85rem 1rem;
-        margin-bottom: 0.75rem;
-    }
-
     .pill-upload .stFileUploader {
         border-radius: 16px !important;
         border: 1px dashed var(--border-subtle) !important;
         background-color: #fafafa !important;
         padding: 0.9rem 1rem !important;
-    }
-
-    /* Dropzone itself */
-    .pill-upload [data-testid="stFileUploaderDropzone"] {
-        border-radius: 16px !important;
-        border: 1px dashed var(--border-subtle) !important;
-        background-color: #fafafa !important;
-    }
-
-    /* Force the “Browse files” button to match our pill button style */
-    .pill-upload [data-testid="stFileUploader"] button {
-        border-radius: 999px !important;
-        padding: 0.45rem 1.4rem !important;
-        border: 1px solid var(--accent-strong) !important;
-        background: linear-gradient(135deg, #ffffff, #f2f2f7) !important;
-        color: #111111 !important;
-        font-weight: 500 !important;
-        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.06) !important;
-        cursor: pointer !important;
-    }
-
-    .pill-upload [data-testid="stFileUploader"] button:hover {
-        background: linear-gradient(135deg, #ffffff, #e5e5ea) !important;
-        border-color: #c7c7cc !important;
     }
 
     .section-title {
@@ -148,6 +116,14 @@ st.markdown(
         font-size: 0.9rem;
     }
 
+    .io-box {
+        border-radius: 16px;
+        background-color: #ffffff;
+        border: 1px solid var(--border-subtle);
+        padding: 0.85rem 1rem;
+        margin-bottom: 0.75rem;
+    }
+
     /* Buttons */
     .stButton > button {
         border-radius: 999px !important;
@@ -161,6 +137,11 @@ st.markdown(
     .stButton > button:hover {
         background: linear-gradient(135deg, #ffffff, #e5e5ea) !important;
         border-color: #c7c7cc !important;
+    }
+
+    /* Try to harmonise file uploader button */
+    .stFileUploader > label div {
+        font-size: 0.9rem;
     }
     </style>
     """,
@@ -197,7 +178,6 @@ def load_matchai_config(path: str | None = None):
             "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
             "summarization_model": "sshleifer/distilbart-cnn-12-6",
             "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-            "ner_model": "dslim/bert-base-NER",
             "weights": {
                 "classifier": 0.5,
                 "similarity": 0.3,
@@ -213,73 +193,39 @@ def load_matchai_config(path: str | None = None):
 @st.cache_resource
 def load_models_and_pipelines(cfg: dict):
     """
-    Load all Hugging Face models, using HF_TOKEN if provided (Streamlit secrets or env).
+    Load classifier, summariser, and embedding model.
+    NER was removed to reduce memory usage.
     """
-    # HF token (optional but recommended on Streamlit Cloud)
-    try:
-        hf_token = st.secrets.get("HF_TOKEN", None)
-    except Exception:
-        hf_token = None
-    if not hf_token:
-        hf_token = os.getenv("HF_TOKEN", None)
+    hf_token = st.secrets.get("HF_TOKEN", None) or os.getenv("HF_TOKEN", None)
 
-    try:
-        st.write("Running load_models_and_pipelines(...).")
-        st.write("Loading models…")
-        st.write(f"Classifier: {cfg['fine_tuned_model_id']}")
-        st.write(f"Summariser: {cfg['summarization_model']}")
-        st.write(f"Embeddings: {cfg['embedding_model']}")
-        st.write(f"NER: {cfg['ner_model']}")
+    clf_id = cfg["fine_tuned_model_id"]
+    clf_tokenizer = AutoTokenizer.from_pretrained(clf_id, token=hf_token)
+    clf_model = AutoModelForSequenceClassification.from_pretrained(
+        clf_id, token=hf_token
+    )
+    clf_model.to(device)
+    clf_model.eval()
 
-        clf_id = cfg["fine_tuned_model_id"]
-        clf_tokenizer = AutoTokenizer.from_pretrained(clf_id, token=hf_token)
-        clf_model = AutoModelForSequenceClassification.from_pretrained(
-            clf_id, token=hf_token
-        )
-        clf_model.to(device)
-        clf_model.eval()
+    summarizer = hf_pipeline(
+        "summarization",
+        model=cfg["summarization_model"],
+        device=0 if torch.cuda.is_available() else -1,
+        token=hf_token,
+    )
 
-        summarizer = hf_pipeline(
-            "summarization",
-            model=cfg["summarization_model"],
-            device=0 if torch.cuda.is_available() else -1,
-            token=hf_token,
-        )
+    sim_model = SentenceTransformer(cfg["embedding_model"], token=hf_token)
 
-        sim_model = SentenceTransformer(cfg["embedding_model"], token=hf_token)
+    raw_map = cfg.get(
+        "label_id2name",
+        {"0": "No Fit", "1": "Potential Fit", "2": "Good Fit"},
+    )
+    label_id2name = {int(k): v for k, v in raw_map.items()}
 
-        ner_pipe = hf_pipeline(
-            "ner",
-            model=cfg["ner_model"],
-            grouped_entities=True,
-            token=hf_token,
-        )
-
-        raw_map = cfg.get(
-            "label_id2name",
-            {"0": "No Fit", "1": "Potential Fit", "2": "Good Fit"},
-        )
-        label_id2name = {int(k): v for k, v in raw_map.items()}
-
-        st.write("✅ Models loaded successfully.")
-        return clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name
-
-    except Exception as e:
-        st.error(
-            "❌ MatchAI couldn’t download one of the Hugging Face models.\n\n"
-            "This usually means Streamlit Cloud could not reach Hugging Face or the "
-            "model ID is invalid.\n\n"
-            "Please try one of the following:\n"
-            "• Run the app locally (where you have internet access to Hugging Face), or\n"
-            "• Double-check the model ID in matchai_config.json, or\n"
-            "• Add a valid HF_TOKEN to Streamlit secrets or environment.\n\n"
-            f"Technical details: `{e}`"
-        )
-        raise
+    return clf_tokenizer, clf_model, summarizer, sim_model, label_id2name
 
 
 config = load_matchai_config()
-clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name = (
+clf_tokenizer, clf_model, summarizer, sim_model, label_id2name = (
     load_models_and_pipelines(config)
 )
 
@@ -339,19 +285,6 @@ def compute_similarity(text1: str, text2: str) -> float:
     return float(sim)
 
 
-def extract_entities(text: str):
-    if not text or not isinstance(text, str):
-        return {"ORG": [], "PER": [], "LOC": []}
-    ents = ner_pipe(text[:1000])
-    result = {"ORG": [], "PER": [], "LOC": []}
-    for e in ents:
-        label = e.get("entity_group")
-        word = e.get("word", "").strip()
-        if label in result and word:
-            result[label].append(word)
-    return result
-
-
 def predict_fit_label(jd_text: str, res_text: str):
     combined = res_text + " [SEP] " + jd_text
     inputs = clf_tokenizer(
@@ -381,8 +314,8 @@ def process_job_description(jd_text: str):
 
 def process_resume(res_text: str):
     summary = summarize_text(res_text)
-    entities = extract_entities(res_text)
-    return {"raw": res_text, "summary": summary, "entities": entities}
+    # NER removed – keep the structure minimal
+    return {"raw": res_text, "summary": summary}
 
 
 def keyword_match_score(jd_keywords, resume_summary: str) -> float:
@@ -395,64 +328,90 @@ def keyword_match_score(jd_keywords, resume_summary: str) -> float:
 
 def generate_candidate_highlights(result_dict: dict) -> str:
     """
-    Make the highlight more natural and actually informative.
+    Generate a natural, useful 2–3 sentence highlight
+    based on label, score, similarity, keywords and resume summary.
     """
     label = result_dict["fit"]["label_name"]
     score_pct = result_dict["final_score"] * 100
     sim = result_dict["similarity"]
     kw = result_dict["keyword_score"]
-    ents = result_dict["resume"]["entities"]
-    orgs = ents.get("ORG", [])
-    locs = ents.get("LOC", [])
+    jd_summary = result_dict["jd"]["summary"]
+    res_summary = result_dict["resume"]["summary"]
+    res_lower = res_summary.lower()
 
     parts = []
 
-    # Overall fit
-    if label.lower().startswith("good") and score_pct >= 80:
-        parts.append("overall this profile looks like a strong match for the role.")
-    elif "Good" in label:
-        parts.append("the model reads this as a generally good match, although not perfect.")
-    elif "Not" in label or "No" in label:
-        parts.append("based on the model, the profile is only a partial fit.")
-    else:
-        parts.append("the automated signals suggest some fit, but it may require closer manual review.")
-
-    # Similarity
-    if sim >= 0.8:
-        parts.append("the experience and skills line up closely with the job description.")
-    elif sim >= 0.65:
-        parts.append("there is a reasonable overlap with the job description, though some gaps remain.")
-
-    # Keywords
-    if kw >= 0.6:
-        parts.append("most of the key requirements and keywords appear in the resume.")
-    elif kw >= 0.4:
-        parts.append("a number of requirements are covered, but not all priority areas are visible.")
-
-    # Organisations / locations – try to make it more human
-    cleaned_orgs = [
-        o for o in orgs
-        if len(o) > 2 and not any(ch.isdigit() for ch in o)
-    ]
-    if cleaned_orgs:
-        unique_orgs = list(dict.fromkeys(cleaned_orgs))[:3]
+    # 1) Overall match level
+    if "Good" in label and score_pct >= 80:
         parts.append(
-            "experience at organisations such as "
-            + ", ".join(unique_orgs)
-            + "."
+            f"Overall, this profile looks like a strong match for the role "
+            f"(score {score_pct:.1f}%, label {label})."
+        )
+    elif "Good" in label or "Potential" in label:
+        parts.append(
+            f"This profile shows a reasonable match to the role "
+            f"(score {score_pct:.1f}%, label {label})."
+        )
+    else:
+        parts.append(
+            f"At first glance this profile appears to be a weaker match "
+            f"(score {score_pct:.1f}%, label {label}), but still worth a quick review."
         )
 
-    cleaned_locs = [l for l in locs if len(l) > 2]
-    if cleaned_locs:
-        unique_locs = list(dict.fromkeys(cleaned_locs))[:2]
-        parts.append("geographical exposure includes " + ", ".join(unique_locs) + ".")
+    # 2) Similarity & keywords
+    if sim >= 0.8 and kw >= 0.6:
+        parts.append(
+            "The CV aligns closely with the job description, both in overall content "
+            "and in coverage of key requirements."
+        )
+    elif sim >= 0.7:
+        parts.append(
+            "There is solid thematic overlap between the CV and the role, "
+            "with several relevant responsibilities reflected."
+        )
+    elif sim >= 0.55:
+        parts.append(
+            "The CV captures some important aspects of the role but may miss a few "
+            "of the core requirements."
+        )
+    else:
+        parts.append(
+            "Alignment with the job description appears limited, suggesting that the role "
+            "may only be a partial fit."
+        )
 
-    if not parts:
-        return "No clear highlight from the automated checks – this profile is best reviewed manually."
+    # 3) Simple heuristic on role / seniority / domain from resume summary
+    signals = []
+    if any(x in res_lower for x in ["manager", "lead", "head", "director"]):
+        signals.append("experience in a leadership or manager-level capacity")
+    elif "senior" in res_lower:
+        signals.append("senior-level responsibilities")
 
-    text = " ".join(parts)
-    # Make the first letter uppercase nicely
-    return text[0].upper() + text[1:]
+    if any(x in res_lower for x in ["data", "analytics", "python", "sql", "machine learning"]):
+        signals.append("a strong data/analytics or technical component")
+    if any(x in res_lower for x in ["finance", "bank", "investment", "audit"]):
+        signals.append("exposure to finance or banking")
+    if any(x in res_lower for x in ["marketing", "brand", "campaign"]):
+        signals.append("experience in marketing or brand-related work")
+    if any(x in res_lower for x in ["hr", "recruitment", "talent acquisition"]):
+        signals.append("background in HR or recruitment")
+
+    if signals:
+        # Turn signal list into human sentence
+        if len(signals) == 1:
+            parts.append(f"The CV indicates {signals[0]}.")
+        else:
+            last = signals[-1]
+            initial = ", ".join(signals[:-1])
+            parts.append(f"The CV indicates {initial}, and {last}.")
+
+    # 4) Fallback if summary is very short
+    if not res_summary.strip():
+        parts.append(
+            "The resume text is limited, so this assessment should be treated as indicative only."
+        )
+
+    return " ".join(parts)
 
 
 def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
@@ -514,16 +473,7 @@ def map_priority(score: float) -> str:
 
 
 def clear_all_inputs():
-    """
-    Reset all user inputs (JD, resume text, and both uploaders).
-    """
-    keys_to_clear = [
-        "jd_text",
-        "resume_text",
-        "uploaded_files",
-        "single_uploaded_file",
-    ]
-    for key in keys_to_clear:
+    for key in ["jd_text", "resume_text", "uploaded_files"]:
         if key in st.session_state:
             del st.session_state[key]
 
@@ -585,7 +535,6 @@ with st.container():
             type=["pdf", "docx", "txt"],
             accept_multiple_files=False,
             label_visibility="collapsed",
-            key="single_uploaded_file",
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -790,8 +739,6 @@ with st.container():
                 st.write(result["jd"]["summary"])
                 st.write("**Resume summary**")
                 st.write(result["resume"]["summary"])
-                st.write("**Extracted organisations (top 5)**")
-                st.write(result["resume"]["entities"].get("ORG", [])[:5])
 
     # ---------------- BATCH MODE RESULT ----------------
     if batch_btn:
