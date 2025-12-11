@@ -2,6 +2,20 @@ streamlit
 transformers
 sentence-transformers
 torch
+numpy
 PyPDF2
 docx2txt
-numpy
+
+# Required by tokenizer, pipelines, huggingface hub
+huggingface-hub
+tokenizers
+safetensors
+
+# Required for summarization pipeline
+requests
+
+# Required for cosine similarity, embedding tensors
+scikit-learn
+
+# Required for dataframe display (batch result)
+pandas
