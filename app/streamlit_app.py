@@ -138,6 +138,28 @@ st.markdown(
         background: linear-gradient(135deg, #ffffff, #e5e5ea) !important;
         border-color: #c7c7cc !important;
     }
+        /* File uploader “Browse files” button – match pill button style */
+    .pill-upload .stFileUploader button {
+        border-radius: 999px !important;
+        padding: 0.35rem 1.4rem !important;
+        border: 1px solid var(--accent-strong) !important;
+        background: linear-gradient(135deg, #ffffff, #f2f2f7) !important;
+        color: #111111 !important;
+        font-weight: 500 !important;
+        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.06) !important;
+    }
+
+    .pill-upload .stFileUploader button:hover {
+        background: linear-gradient(135deg, #ffffff, #e5e5ea) !important;
+        border-color: #c7c7cc !important;
+    }
+
+    /* Cleaner dropzone box */
+    .pill-upload .stFileUploader [data-testid="stFileUploaderDropzone"] {
+        border-radius: 16px !important;
+        border: 1px dashed var(--border-subtle) !important;
+        background-color: #fafafa !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
