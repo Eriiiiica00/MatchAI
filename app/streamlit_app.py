@@ -187,22 +187,63 @@ def load_matchai_config(path: str | None = None):
 
 @st.cache_resource
 def load_models_and_pipelines(cfg: dict):
+    """
+    Load classifier, summarizer, embedding model and NER pipeline.
+
+    If Hugging Face download fails (e.g. no internet / rate limit on Streamlit Cloud),
+    show a clear error and stop the app gracefully.
+    """
     clf_id = cfg["fine_tuned_model_id"]
-    clf_tokenizer = AutoTokenizer.from_pretrained(clf_id)
-    clf_model = AutoModelForSequenceClassification.from_pretrained(clf_id)
-    clf_model.to(device)
-    clf_model.eval()
+    sum_id = cfg["summarization_model"]
+    emb_id = cfg["embedding_model"]
+    ner_id = cfg["ner_model"]
 
-    summarizer = hf_pipeline(
-        "summarization",
-        model=cfg["summarization_model"],
-        device=0 if torch.cuda.is_available() else -1,
-    )
+    st.write("Loading models…")
+    st.write(f"- Classifier: `{clf_id}`")
+    st.write(f"- Summariser: `{sum_id}`")
+    st.write(f"- Embeddings: `{emb_id}`")
+    st.write(f"- NER: `{ner_id}`")
 
-    sim_model = SentenceTransformer(cfg["embedding_model"])
+    try:
+        # Classifier
+        clf_tokenizer = AutoTokenizer.from_pretrained(clf_id)
+        clf_model = AutoModelForSequenceClassification.from_pretrained(clf_id)
+        clf_model.to(device)
+        clf_model.eval()
 
-    ner_pipe = hf_pipeline("ner", model=cfg["ner_model"], grouped_entities=True)
+        # Summarizer
+        summarizer = hf_pipeline(
+            "summarization",
+            model=sum_id,
+            device=0 if torch.cuda.is_available() else -1,
+        )
 
+        # Embedding model
+        sim_model = SentenceTransformer(emb_id)
+
+        # NER pipeline
+        ner_pipe = hf_pipeline("ner", model=ner_id, grouped_entities=True)
+
+    except OSError as e:
+        st.error(
+            "❌ MatchAI couldn’t download one of the Hugging Face models.\n\n"
+            "This usually means Streamlit Cloud could not reach Hugging Face "
+            "or the model ID is invalid.\n\n"
+            "Please try one of the following:\n"
+            "• Run the app locally (where you have internet access to Hugging Face), or\n"
+            "• Double-check the model ID in `matchai_config.json`, or\n"
+            "• Wait and refresh in case it was a temporary network issue.\n\n"
+            f"Technical details:\n`{e}`"
+        )
+        st.stop()
+    except Exception as e:
+        st.error(
+            "❌ MatchAI hit an unexpected error while loading models.\n\n"
+            f"Details: {e}"
+        )
+        st.stop()
+
+    # Label mapping
     raw_map = cfg.get(
         "label_id2name",
         {"0": "No Fit", "1": "Potential Fit", "2": "Good Fit"},
@@ -318,86 +359,106 @@ def keyword_match_score(jd_keywords, resume_summary: str) -> float:
     hits = sum(1 for kw in jd_keywords if kw in resume_words)
     return hits / len(jd_keywords)
 
-# === NEW, IMPROVED HIGHLIGHT FUNCTION =======================
+def _clean_org_list(orgs: list[str]) -> list[str]:
+    """
+    Try to remove noise like 'CA', 'Finance', single letters, etc.,
+    and keep more realistic organisation names.
+    """
+    cleaned = []
+    for org in orgs:
+        o = org.strip()
+        core = o.replace(" ", "")
+        if len(core) < 3:
+            continue
+        # skip very generic tokens
+        lowered = o.lower()
+        if lowered in {"finance", "accounting", "university"}:
+            continue
+        cleaned.append(o)
+    # keep unique order
+    unique = []
+    seen = set()
+    for o in cleaned:
+        if o not in seen:
+            seen.add(o)
+            unique.append(o)
+    return unique
 
 def generate_candidate_highlights(result_dict: dict) -> str:
     """
-    Produce a short, natural summary that gives HR an immediate feel for:
-    - overall fit,
-    - what the candidate is strong at,
-    - where they might be weaker.
+    Build a short, natural-language highlight that gives an immediate feel
+    for the candidate: overall fit, key strengths + orgs, based on the model outputs.
     """
     label = result_dict["fit"]["label_name"]
-    score = result_dict["final_score"]
-    score_pct = score * 100
+    score_pct = result_dict["final_score"] * 100
     sim = result_dict["similarity"]
     kw = result_dict["keyword_score"]
-
+    prob_good = result_dict["prob_good_fit"]
     ents = result_dict["resume"]["entities"]
-    orgs = ents.get("ORG", [])
+    orgs_raw = ents.get("ORG", [])
+    orgs = _clean_org_list(orgs_raw)
+    resume_summary = result_dict["resume"].get("summary", "").strip()
 
-    # Clean and deduplicate organisation names a bit
-    cleaned_orgs = []
-    for o in orgs:
-        o_clean = o.strip(",.;: ").title()
-        if 2 < len(o_clean) <= 40:  # avoid obvious junk / very short tokens
-            cleaned_orgs.append(o_clean)
-    cleaned_orgs = list(dict.fromkeys(cleaned_orgs))[:3]
-
-    # JD keywords actually present in resume summary
-    jd_keywords = result_dict["jd"]["keywords"]
-    resume_words = set(w.lower().strip(",.!?;:") for w in result_dict["resume"]["summary"].split())
-    matched_keywords = [kwd for kwd in jd_keywords if kwd in resume_words][:5]
-
-    lines = []
+    parts = []
 
     # 1) Overall fit sentence
     if label.lower().startswith("good") and score_pct >= 80:
-        lines.append(f"Overall this profile looks like a strong match for the role ({score_pct:.0f}% suitability).")
-    elif "potential" in label.lower() or (label.lower().startswith("good") and score_pct < 80):
-        lines.append(f"Overall this profile appears to be a partial but promising match ({score_pct:.0f}% suitability).")
+        parts.append(
+            f"Overall this profile looks like a strong match for the role "
+            f"(suitability score {score_pct:.0f}% and P(Good Fit) {prob_good:.0%})."
+        )
+    elif "Potential" in label:
+        parts.append(
+            f"This profile appears to be a potential fit, with some relevant strengths "
+            f"(suitability score {score_pct:.0f}%)."
+        )
     else:
-        lines.append(f"Overall this profile appears to be a weaker match at this stage ({score_pct:.0f}% suitability).")
+        parts.append(
+            f"Based on the current resume, this looks like a weaker match "
+            f"(suitability score {score_pct:.0f}% and lower P(Good Fit))."
+        )
 
-    # 2) Strengths / specifics
-    strengths = []
-
-    # Semantic overlap
-    if sim >= 0.80:
-        strengths.append(f"the resume is very close to the job description in content (similarity {sim:.2f})")
+    # 2) Semantic similarity / keyword coverage
+    if sim >= 0.8 and kw >= 0.6:
+        parts.append(
+            "The experience and skills described line up closely with the job description, "
+            "both in overall content and in key requirements."
+        )
+    elif sim >= 0.8:
+        parts.append(
+            "There is strong semantic overlap with the job description, suggesting closely related experience."
+        )
     elif sim >= 0.65:
-        strengths.append(f"there is some solid overlap with the role responsibilities (similarity {sim:.2f})")
-
-    # Keyword coverage
-    if matched_keywords and kw >= 0.55:
-        strengths.append(
-            "it directly references key requirements such as "
-            + ", ".join(matched_keywords)
-        )
-    elif matched_keywords:
-        strengths.append(
-            "it touches on several relevant requirements (e.g. "
-            + ", ".join(matched_keywords)
-            + ")"
+        parts.append(
+            "There is moderate semantic overlap with the job description, indicating some relevant background."
         )
 
-    # Organisations
-    if cleaned_orgs:
-        strengths.append(
-            "the candidate has experience with organisations such as "
-            + ", ".join(cleaned_orgs)
+    if kw >= 0.6:
+        parts.append(
+            "Many of the important skills and requirements from the job description are explicitly reflected in the resume."
+        )
+    elif 0.3 <= kw < 0.6:
+        parts.append(
+            "Some core requirements appear in the resume, but parts of the role may still require development."
         )
 
-    if strengths:
-        lines.append("Key signals from the model indicate that " + "; ".join(strengths) + ".")
-    else:
-        lines.append(
-            "The automated checks do not highlight any obvious strengths, so manual review is recommended, especially for softer skills and potential."
-        )
+    # 3) Organisations / employer signal
+    if orgs:
+        shown = ", ".join(orgs[:3])
+        parts.append(f"The candidate has experience with organisations such as {shown}.")
 
-    return " ".join(lines)
+    # 4) One short “profile hint” from the summary, if it looks reasonable
+    if resume_summary:
+        first_sentence = resume_summary.split(".")[0].strip()
+        if len(first_sentence) > 20:
+            parts.append(f"Profile summary: {first_sentence}.")
 
-# ============================================================
+    if not parts:
+        return "No clear strengths stand out from the automated signals; manual review is recommended."
+
+    # Make it flow as 2–4 short sentences
+    highlight = " ".join(parts)
+    return highlight.strip()
 
 def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
     jd = process_job_description(jd_text)
@@ -409,6 +470,7 @@ def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
     kw_score = keyword_match_score(jd["keywords"], res["summary"])
 
     fit = predict_fit_label(jd_text, res_text)
+    # For 3-class or 2-class models
     if len(fit["probs"]) >= 3:
         prob_good_fit = fit["probs"][2]
     else:
