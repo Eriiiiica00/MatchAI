@@ -17,7 +17,7 @@ import PyPDF2
 import docx2txt
 
 # ============================================================
-# 0. BASIC SETUP
+# 0. BASIC SETUP & GLOBAL STYLE
 # ============================================================
 
 st.set_page_config(
@@ -26,99 +26,117 @@ st.set_page_config(
     layout="wide",
 )
 
-# Apple-ish, but cleaner (no weird twin bars, consistent font)
+# Neutral Apple-ish theme: white / light grey only, full-width cards
 st.markdown(
     """
     <style>
     :root {
-        --matchai-bg: #f5f5f7;
-        --matchai-card: #ffffff;
-        --matchai-border: #d2d2d7;
-        --matchai-accent: #007aff;
-        --matchai-accent-hover: #0a84ff;
-        --matchai-text-main: #1d1d1f;
-        --matchai-text-muted: #6e6e73;
+        --bg-main: #f5f5f7;
+        --card-bg: #ffffff;
+        --border-subtle: #e5e5ea;
+        --accent-soft: #f0f0f5;
+        --accent-strong: #d1d1d6;
+        --text-main: #1c1c1e;
+        --text-muted: #6e6e73;
     }
 
-    html, body, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] {
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
-                     "Helvetica Neue", Arial, sans-serif !important;
-        color: var(--matchai-text-main) !important;
+    html, body, [class^="css"]  {
+        font-family: -apple-system, system-ui, BlinkMacSystemFont, "SF Pro Text",
+                     "Helvetica Neue", Arial, sans-serif;
     }
 
     .main {
-        background-color: var(--matchai-bg);
+        background-color: var(--bg-main);
     }
 
-    /* Generic cards */
-    .score-card {
-        padding: 1rem 1.5rem;
-        border-radius: 0.85rem;
-        background-color: var(--matchai-card);
-        border: 1px solid var(--matchai-border);
-        box-shadow: 0 8px 18px rgba(0,0,0,0.04);
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 1.5rem !important;
+        max-width: 1100px;
     }
 
-    .metric-box {
-        padding: 0.75rem 1rem;
-        border-radius: 0.65rem;
-        background-color: #f0f1f5;
-        border: 1px solid var(--matchai-border);
-        font-size: 0.9rem;
+    .round-card {
+        padding: 1.25rem 1.5rem;
+        border-radius: 20px;
+        background-color: var(--card-bg);
+        border: 1px solid var(--border-subtle);
+        box-shadow: 0 16px 35px rgba(0, 0, 0, 0.04);
+        margin-bottom: 1rem;
+    }
+
+    .pill-input textarea,
+    .pill-input .stTextArea textarea,
+    .pill-input .stTextInput input {
+        border-radius: 16px !important;
+        border: 1px solid var(--border-subtle) !important;
+        background-color: #ffffff !important;
+        min-height: 220px !important;
+        padding: 0.9rem 1rem !important;
+        box-shadow: none !important;
+    }
+
+    .pill-upload .stFileUploader {
+        border-radius: 16px !important;
+        border: 1px dashed var(--border-subtle) !important;
+        background-color: #fafafa !important;
+        padding: 0.9rem 1rem !important;
     }
 
     .section-title {
         font-weight: 600;
         font-size: 1.05rem;
-        margin-bottom: 0.35rem;
-        color: var(--matchai-text-main);
+        margin-bottom: 0.4rem;
+        color: var(--text-main);
     }
 
-    p, label, span, div, h1, h2, h3, h4, h5 {
-        color: var(--matchai-text-main) !important;
+    .soft-label {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
     }
 
-    /* Primary buttons */
-    div.stButton > button {
-        background-color: var(--matchai-accent);
-        color: #ffffff !important;
-        border-radius: 999px;
-        border: none;
-        padding: 0.55rem 1.4rem;
+    .muted {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+    }
+
+    .score-number {
+        font-size: 2.1rem;
         font-weight: 600;
-        font-size: 0.95rem;
-    }
-    div.stButton > button:hover {
-        background-color: var(--matchai-accent-hover);
-        color: #ffffff !important;
+        color: #111111;
+        margin: 0;
     }
 
-    /* Text inputs / textareas: remove big pill look / glow */
-    textarea, .stTextArea textarea, .stTextInput input {
-        border-radius: 8px !important;
-        border: 1px solid var(--matchai-border) !important;
-        box-shadow: none !important;
-        background-color: #ffffff !important;
+    .metric-box {
+        padding: 0.85rem 1rem;
+        border-radius: 16px;
+        background: #fafafa;
+        border: 1px solid var(--accent-soft);
+        font-size: 0.9rem;
     }
 
-    /* Radio / sliders accent */
-    .st-emotion-cache-1n543e5 input:checked + div,
-    .st-emotion-cache-16idsys input:checked + div {
-        background-color: var(--matchai-accent) !important;
-    }
-    .stSlider > div > div > div > div {
-        background: var(--matchai-accent) !important;
-    }
-
-    /* Dataframe header */
-    thead tr th {
-        background-color: #eaeaef !important;
-        color: var(--matchai-text-main) !important;
+    .io-box {
+        border-radius: 16px;
+        background-color: #ffffff;
+        border: 1px solid var(--border-subtle);
+        padding: 0.85rem 1rem;
+        margin-bottom: 0.75rem;
     }
 
-    *:focus {
-        outline: none !important;
-        box-shadow: none !important;
+    /* Buttons */
+    .stButton > button {
+        border-radius: 999px !important;
+        padding: 0.45rem 1.4rem !important;
+        border: 1px solid var(--accent-strong) !important;
+        background: linear-gradient(135deg, #ffffff, #f2f2f7) !important;
+        color: #111111 !important;
+        font-weight: 500 !important;
+        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.06) !important;
+    }
+    .stButton > button:hover {
+        background: linear-gradient(135deg, #ffffff, #e5e5ea) !important;
+        border-color: #c7c7cc !important;
     }
     </style>
     """,
@@ -134,7 +152,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 @st.cache_resource
 def load_matchai_config(path: str | None = None):
     """
-    Load matchai_config.json from the same folder as streamlit_app.py.
+    Load matchai_config.json from the same folder as streamlit_app.py
+    so it works both locally and on Streamlit Cloud.
     """
     if path is None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -145,9 +164,13 @@ def load_matchai_config(path: str | None = None):
             cfg = json.load(f)
         return cfg
     except Exception as e:
-        st.error(f"Could not load matchai_config.json at: {path}\nUsing fallback config. Error: {e}")
+        st.error(
+            "Could not load matchai_config.json.\n"
+            f"Using fallback config for demo. Error: {e}"
+        )
+        # Fallback config (2-class SST model – just for pipeline testing)
         return {
-            "fine_tuned_model_id": "your-username/matchai-fit-classifier",
+            "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
             "summarization_model": "sshleifer/distilbart-cnn-12-6",
             "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
             "ner_model": "dslim/bert-base-NER",
@@ -157,51 +180,49 @@ def load_matchai_config(path: str | None = None):
                 "keywords": 0.2,
             },
             "label_id2name": {
-                "0": "No Fit",
-                "1": "Potential Fit",
-                "2": "Good Fit",
+                "0": "Not Fit",
+                "1": "Good Fit",
             },
         }
 
 @st.cache_resource
 def load_models_and_pipelines(cfg: dict):
-    # Classifier
     clf_id = cfg["fine_tuned_model_id"]
     clf_tokenizer = AutoTokenizer.from_pretrained(clf_id)
     clf_model = AutoModelForSequenceClassification.from_pretrained(clf_id)
     clf_model.to(device)
     clf_model.eval()
 
-    # Summarizer
     summarizer = hf_pipeline(
         "summarization",
         model=cfg["summarization_model"],
         device=0 if torch.cuda.is_available() else -1,
     )
 
-    # Embedding model
     sim_model = SentenceTransformer(cfg["embedding_model"])
 
-    # NER pipeline
-    ner_pipe = hf_pipeline(
-        "ner", model=cfg["ner_model"], grouped_entities=True
-    )
+    ner_pipe = hf_pipeline("ner", model=cfg["ner_model"], grouped_entities=True)
 
-    # Label mapping
-    raw_map = cfg.get("label_id2name", {"0": "No Fit", "1": "Potential Fit", "2": "Good Fit"})
+    raw_map = cfg.get(
+        "label_id2name",
+        {"0": "No Fit", "1": "Potential Fit", "2": "Good Fit"},
+    )
     label_id2name = {int(k): v for k, v in raw_map.items()}
 
     return clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name
 
+
 config = load_matchai_config()
-clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name = load_models_and_pipelines(config)
+clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name = (
+    load_models_and_pipelines(config)
+)
 
 DEFAULT_WEIGHTS = config.get(
     "weights", {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2}
 )
 
 # ============================================================
-# 2. HELPER FUNCTIONS
+# 2. HELPER FUNCTIONS (TEXT, MODELS, SCORING)
 # ============================================================
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -299,58 +320,41 @@ def keyword_match_score(jd_keywords, resume_summary: str) -> float:
 
 def generate_candidate_highlights(result_dict: dict) -> str:
     label = result_dict["fit"]["label_name"]
-    score = result_dict["final_score"]
-    score_pct = score * 100
+    score_pct = result_dict["final_score"] * 100
     sim = result_dict["similarity"]
     kw = result_dict["keyword_score"]
     ents = result_dict["resume"]["entities"]
     orgs = ents.get("ORG", [])
     pers = ents.get("PER", [])
 
-    strength_bits = []
+    bits = []
 
-    if label == "Good Fit" and score_pct >= 80:
-        strength_bits.append("strong overall match to the job requirements.")
-    elif label == "Potential Fit":
-        strength_bits.append("partial match with room to grow into the role.")
+    if label.lower().startswith("good") and score_pct >= 80:
+        bits.append("a strong overall match to the role.")
+    elif "Potential" in label:
+        bits.append("a partial match with scope to grow into the role.")
     else:
-        strength_bits.append(
-            "limited alignment with the role based on current resume content."
-        )
+        bits.append("limited alignment based on the current resume content.")
 
     if sim >= 0.8:
-        strength_bits.append(
-            "high semantic similarity between the resume and job description."
-        )
+        bits.append("high semantic similarity to the job description.")
     elif sim >= 0.65:
-        strength_bits.append(
-            "moderate semantic similarity, suggesting some relevant experience."
-        )
+        bits.append("moderate semantic similarity, suggesting related experience.")
 
     if kw >= 0.6:
-        strength_bits.append(
-            "good coverage of key role-related keywords in the resume."
-        )
+        bits.append("good coverage of key requirements and skills.")
     elif kw >= 0.4:
-        strength_bits.append(
-            "some important keywords matching the job description."
-        )
+        bits.append("some important requirements reflected in the resume.")
 
     if orgs:
-        strength_bits.append(
-            f"experience with notable organisations (e.g. {', '.join(orgs[:3])})."
-        )
-
+        bits.append(f"experience with notable organisations (e.g. {', '.join(orgs[:3])}).")
     if pers:
-        strength_bits.append(
-            "clear identification of personal profile details in the resume."
-        )
+        bits.append("a clearly identifiable candidate profile in the resume.")
 
-    if not strength_bits:
-        return "No standout signals detected. The candidate may require manual review."
+    if not bits:
+        return "No standout signals detected – manual review recommended."
 
-    sentence = "This candidate shows " + " ".join(strength_bits)
-    return sentence.strip()
+    return "This candidate shows " + " ".join(bits)
 
 def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
     jd = process_job_description(jd_text)
@@ -401,54 +405,86 @@ def evaluate_batch(jd_text: str, resumes_list: list, weights: dict):
 
 def map_priority(score: float) -> str:
     if score >= 0.8:
-        return "Interview Priority: HIGH"
+        return "Interview priority: HIGH"
     elif score >= 0.6:
-        return "Interview Priority: MEDIUM"
+        return "Interview priority: MEDIUM"
     else:
-        return "Interview Priority: LOW"
+        return "Interview priority: LOW"
+
+def clear_all_inputs():
+    for key in ["jd_text", "resume_text", "uploaded_files"]:
+        if key in st.session_state:
+            del st.session_state[key]
 
 # ============================================================
-# 3. UI LAYOUT
+# 3. HEADER
 # ============================================================
 
 st.title("🔍 MatchAI: Candidate Suitability Screening")
-st.caption("Screen and prioritise candidates against a specific job description.")
+st.markdown(
+    "<span class='muted'>Screen and prioritise candidates against a specific job description.</span>",
+    unsafe_allow_html=True,
+)
 
-col_left, col_right = st.columns([1, 1.2])
+# ============================================================
+# 4. INPUTS CARD (FULL-WIDTH ROW)
+# ============================================================
 
-# ---------------- LEFT: INPUTS ----------------
-with col_left:
-    st.markdown("### 1. Job Description & Candidate Resumes")
+with st.container():
+    st.markdown("<div class='round-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='soft-label'>INPUTS</div>", unsafe_allow_html=True)
 
+    st.markdown("<div class='section-title'>Job description</div>", unsafe_allow_html=True)
+    st.markdown("<div class='io-box pill-input'>", unsafe_allow_html=True)
     jd_text = st.text_area(
-        "Job Description",
-        height=220,
-        placeholder="Paste the job description here (responsibilities, skills, qualifications)...",
+        "",
         key="jd_text",
+        height=230,
+        placeholder="Paste the job description here...",
     )
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    mode = st.radio(
-        "Evaluation mode",
-        ["Single candidate", "Batch (multiple resumes)"],
-        horizontal=True,
-    )
-
-    st.markdown("#### Candidate Resume(s)")
+    st.markdown("<div class='section-title'>Candidate resumes</div>", unsafe_allow_html=True)
+    c_mode, c_hint = st.columns([0.45, 0.55])
+    with c_mode:
+        mode = st.radio(
+            "Mode",
+            ["Single candidate", "Batch (multiple resumes)"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="mode",
+        )
+    with c_hint:
+        if mode == "Single candidate":
+            st.markdown(
+                "<div class='muted' style='margin-top:0.3rem;'>Upload a file or paste the resume text.</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div class='muted' style='margin-top:0.3rem;'>Upload multiple resumes (max 30 per batch). PDFs, Word, or text.</div>",
+                unsafe_allow_html=True,
+            )
 
     if mode == "Single candidate":
+        st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+        st.markdown("<div class='pill-upload'>", unsafe_allow_html=True)
         uploaded_file = st.file_uploader(
             "Upload resume (PDF / Word / TXT, optional)",
             type=["pdf", "docx", "txt"],
             accept_multiple_files=False,
-            key="single_upload",
+            label_visibility="collapsed",
         )
+        st.markdown("</div>", unsafe_allow_html=True)
 
+        st.markdown("<div class='pill-input'>", unsafe_allow_html=True)
         resume_text = st.text_area(
-            "Or paste resume text",
-            height=220,
-            placeholder="Paste the candidate's resume here or upload a file above...",
+            "",
             key="resume_text",
+            height=220,
+            placeholder="Paste resume text here...",
         )
+        st.markdown("</div>", unsafe_allow_html=True)
 
         if uploaded_file is not None:
             if uploaded_file.type == "application/pdf":
@@ -461,57 +497,66 @@ with col_left:
             else:
                 extracted = uploaded_file.read().decode("utf-8", errors="ignore")
 
-            if extracted:
-                if not st.session_state.get("resume_text", "").strip():
-                    st.session_state["resume_text"] = extracted
-                st.info(f"Text extracted from: {uploaded_file.name[:60]}")
+            if extracted and not resume_text.strip():
+                st.session_state["resume_text"] = extracted
+                resume_text = extracted
+                st.info(f"Text extracted from: {uploaded_file.name[:40]}")
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
     else:
-        st.caption("You can upload multiple resumes. Maximum 30 per batch.")
+        st.markdown("<div class='io-box'>", unsafe_allow_html=True)
         MAX_RESUMES = 30
+        st.markdown("<div class='pill-upload'>", unsafe_allow_html=True)
         uploaded_files = st.file_uploader(
-            "Upload resumes (PDF / Word / TXT)",
+            "Upload multiple resumes",
             type=["pdf", "docx", "txt"],
             accept_multiple_files=True,
-            key="batch_upload",
+            key="uploaded_files",
+            label_visibility="collapsed",
         )
+        st.markdown("</div>", unsafe_allow_html=True)
 
         if uploaded_files and len(uploaded_files) > MAX_RESUMES:
-            st.error(f"Too many resumes uploaded. Maximum allowed is {MAX_RESUMES}.")
-            st.stop()
+            st.error(f"Too many files uploaded – maximum {MAX_RESUMES} per batch.")
 
-    st.markdown("---")
-    if st.button("Clear all inputs"):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
-        st.experimental_rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------- RIGHT: SCORE, WEIGHTS, RESULTS ----------------
-with col_right:
-    st.markdown("### 2. Scoring & Results")
+    # Clear button – aligned to left within the card
+    clear_col, _ = st.columns([0.2, 0.8])
+    with clear_col:
+        if st.button("Clear inputs"):
+            clear_all_inputs()
+            st.experimental_rerun()
 
-    st.markdown(
-        """
-        <div class="score-card">
-            <div class="section-title">Final Suitability Score</div>
-            <p style="margin-bottom: 0.4rem; color: var(--matchai-text-muted);">
-                The score combines three signals:
-            </p>
-            <ul style="margin-top: 0; margin-bottom: 0.4rem; color: var(--matchai-text-muted);">
-                <li><b>P(Good Fit)</b> – classifier confidence</li>
-                <li><b>Similarity</b> – semantic match between JD and resume</li>
-                <li><b>Keyword Coverage</b> – how much of the JD appears in the resume</li>
-            </ul>
-            <p style="margin-bottom: 0; color: var(--matchai-text-muted);">
-                Default formula: <b>Final Score = 0.5 × P(Good Fit) + 0.3 × Similarity + 0.2 × Keyword Coverage</b>
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    with st.expander("Adjust scoring weights (optional)", expanded=False):
-        st.caption("Weights are normalised automatically. Use this to shift emphasis (e.g. more classifier vs. more similarity).")
+# ============================================================
+# 5. EVALUATION & RESULTS CARD (FULL-WIDTH ROW)
+# ============================================================
+
+with st.container():
+    st.markdown("<div class='round-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='soft-label'>EVALUATION</div>", unsafe_allow_html=True)
+
+    top_row = st.columns([0.5, 0.5])
+    with top_row[0]:
+        st.markdown("<div class='section-title'>MatchAI score</div>", unsafe_allow_html=True)
+    with top_row[1]:
+        with st.expander("ℹ️  How is the score calculated?", expanded=False):
+            st.write(
+                "The final suitability score combines three signals:\n"
+                "- **P(Good Fit)** from the fine-tuned classifier\n"
+                "- **Semantic similarity** between JD and resume summaries\n"
+                "- **Keyword coverage** of JD terms in the resume\n\n"
+                "Default formula:\n"
+                "**Final Score = 0.5 × P(Good Fit) + 0.3 × Similarity + 0.2 × Keyword Coverage**.\n\n"
+                "Weights can be adjusted below to reflect different HR priorities."
+            )
+
+    # Weights expander – close to score explanation
+    with st.expander("Adjust scoring weights (optional)"):
+        st.caption("Weights are normalised automatically. Reset to return to defaults.")
 
         if "w_clf" not in st.session_state:
             st.session_state.w_clf = DEFAULT_WEIGHTS["classifier"]
@@ -557,8 +602,8 @@ with col_right:
             }
 
         st.caption(
-            f"Normalised weights → P(Good Fit): {weights['classifier']:.2f}, "
-            f"Similarity: {weights['similarity']:.2f}, Keywords: {weights['keywords']:.2f}"
+            f"Normalised weights →  P(Good Fit): {weights['classifier']:.2f},  "
+            f"Similarity: {weights['similarity']:.2f},  Keywords: {weights['keywords']:.2f}"
         )
 
         if st.button("Reset to default weights"):
@@ -567,142 +612,144 @@ with col_right:
             st.session_state.w_kw = DEFAULT_WEIGHTS["keywords"]
             st.experimental_rerun()
 
+    # Safety: if expander not opened yet, ensure weights exist
+    if "weights" not in locals():
+        weights = DEFAULT_WEIGHTS
+
     st.markdown("---")
 
-    if mode == "Single candidate":
-        score_button = st.button("🔍 Score candidate", use_container_width=True)
+    # Score buttons – near top of evaluation card
+    button_row = st.columns([0.35, 0.35, 0.3])
+    with button_row[0]:
+        single_btn = st.button("🔍 Score single candidate")
+    with button_row[1]:
+        batch_btn = st.button("🔍 Score candidates (batch)")
 
-        if score_button:
-            resume_text_val = st.session_state.get("resume_text", "")
-            if not jd_text.strip():
-                st.error("Please provide a job description.")
-            elif not resume_text_val.strip():
-                st.error("Please provide resume text or upload a file.")
-            else:
-                with st.spinner("Evaluating candidate..."):
-                    result = evaluate_candidate(jd_text, resume_text_val, weights)
+    # ---------------- SINGLE MODE RESULT ----------------
+    if single_btn:
+        jd_val = st.session_state.get("jd_text", "")
+        resume_val = st.session_state.get("resume_text", "")
 
-                score = result["final_score"]
-                score_pct = score * 100
-                label = result["fit"]["label_name"]
-                prob_good = result["prob_good_fit"]
+        if not jd_val.strip():
+            st.error("Please provide a job description in the Inputs section.")
+        elif not resume_val.strip():
+            st.error("Please provide resume text or upload a file in the Inputs section.")
+        else:
+            with st.spinner("Evaluating candidate..."):
+                result = evaluate_candidate(jd_val, resume_val, weights)
 
-                st.markdown("#### Result – Single Candidate")
-                st.markdown('<div class="score-card">', unsafe_allow_html=True)
-                st.markdown(
-                    f"<div class='section-title'>Final Suitability Score</div>"
-                    f"<p style='font-size: 2.2rem; margin: 0.2rem 0 0.4rem 0;'><b>{score_pct:.1f}%</b></p>",
-                    unsafe_allow_html=True,
-                )
-                st.write(f"**Predicted fit label:** {label}")
-                st.write(f"**P(Good Fit):** {prob_good:.2f}")
-                st.write(f"**{map_priority(score)}**")
-                st.write(f"**Candidate highlight:** {result['highlight']}")
+            score = result["final_score"]
+            score_pct = score * 100
+            label = result["fit"]["label_name"]
+            prob_good = result["prob_good_fit"]
+
+            st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+            st.markdown("<div class='section-title'>Result – Single candidate</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<p class='soft-label'>Final suitability score</p>"
+                f"<p class='score-number'>{score_pct:.1f}%</p>",
+                unsafe_allow_html=True,
+            )
+            st.write(f"**Predicted fit label:** {label}")
+            st.write(f"**P(Good Fit):** {prob_good:.2f}")
+            st.write(f"**{map_priority(score)}**")
+            st.write(f"**Highlight:** {result['highlight']}")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
+                st.write("**Semantic similarity**")
+                st.write(f"{result['similarity']:.3f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with m2:
+                st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
+                st.write("**Keyword coverage**")
+                st.write(f"{result['keyword_score']:.3f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with m3:
+                st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
+                st.write("**Model fit confidence**")
+                st.write(f"{prob_good:.3f}")
                 st.markdown("</div>", unsafe_allow_html=True)
 
-                m1, m2, m3 = st.columns(3)
-                with m1:
-                    st.markdown('<div class="metric-box">', unsafe_allow_html=True)
-                    st.write("**Semantic Similarity**")
-                    st.write(f"{result['similarity']:.3f}")
-                    st.markdown("</div>", unsafe_allow_html=True)
-                with m2:
-                    st.markdown('<div class="metric-box">', unsafe_allow_html=True)
-                    st.write("**Keyword Coverage**")
-                    st.write(f"{result['keyword_score']:.3f}")
-                    st.markdown("</div>", unsafe_allow_html=True)
-                with m3:
-                    st.markdown('<div class="metric-box">', unsafe_allow_html=True)
-                    st.write("**Model Fit Confidence**")
-                    st.write(f"{prob_good:.3f}")
-                    st.markdown("</div>", unsafe_allow_html=True)
+            with st.expander("Model-driven details"):
+                st.write("**JD summary**")
+                st.write(result["jd"]["summary"])
+                st.write("**Resume summary**")
+                st.write(result["resume"]["summary"])
+                st.write("**Extracted organisations (top 5)**")
+                st.write(result["resume"]["entities"].get("ORG", [])[:5])
 
-                with st.expander("View model-driven details"):
-                    st.write("**JD summary:**")
-                    st.write(result["jd"]["summary"])
-                    st.write("**Resume summary:**")
-                    st.write(result["resume"]["summary"])
-                    st.write("**Extracted organisations (top 5):**")
-                    st.write(result["resume"]["entities"].get("ORG", [])[:5])
+    # ---------------- BATCH MODE RESULT ----------------
+    if batch_btn:
+        jd_val = st.session_state.get("jd_text", "")
+        uploaded_files_val = st.session_state.get("uploaded_files", None)
 
-    else:
-        batch_button = st.button("🔍 Score all resumes (batch)", use_container_width=True)
-
-        if batch_button:
-            if not jd_text.strip():
-                st.error("Please provide a job description.")
-            elif not uploaded_files:
-                st.error("Please upload at least one resume file.")
-            else:
-                resumes_list = []
-                for f in uploaded_files:
-                    if f.type == "application/pdf":
-                        text = extract_text_from_pdf(f.read())
-                    elif f.type in [
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        "application/msword",
-                    ]:
-                        text = extract_text_from_docx(f.read())
-                    else:
-                        text = f.read().decode("utf-8", errors="ignore")
-
-                    if text.strip():
-                        resumes_list.append({"name": f.name, "text": text})
-
-                if not resumes_list:
-                    st.error("No readable text found in uploaded resumes.")
+        if not jd_val.strip():
+            st.error("Please provide a job description in the Inputs section.")
+        elif not uploaded_files_val:
+            st.error("Please upload at least one resume file in the Inputs section.")
+        else:
+            resumes_list = []
+            for f in uploaded_files_val:
+                if f.type == "application/pdf":
+                    text = extract_text_from_pdf(f.read())
+                elif f.type in [
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/msword",
+                ]:
+                    text = extract_text_from_docx(f.read())
                 else:
-                    with st.spinner("Evaluating all candidates..."):
-                        batch_results = evaluate_batch(jd_text, resumes_list, weights)
+                    text = f.read().decode("utf-8", errors="ignore")
 
-                    st.markdown("#### Result – Batch Candidate Ranking")
+                if text.strip():
+                    resumes_list.append({"name": f.name, "text": text})
 
-                    table_rows = []
-                    for rank, r in enumerate(batch_results, start=1):
-                        table_rows.append(
-                            {
-                                "Rank": rank,
-                                "File": r.get("file_name", f"Candidate {rank}"),
-                                "Fit label": r["fit"]["label_name"],
-                                "Final score (%)": round(r["final_score"] * 100, 1),
-                                "P(Good Fit)": round(r["prob_good_fit"], 3),
-                                "Similarity": round(r["similarity"], 3),
-                                "Keyword score": round(r["keyword_score"], 3),
-                            }
+            if not resumes_list:
+                st.error("No readable text found in uploaded resumes.")
+            else:
+                with st.spinner("Evaluating all candidates..."):
+                    batch_results = evaluate_batch(jd_val, resumes_list, weights)
+
+                st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+                st.markdown("<div class='section-title'>Result – Batch candidate ranking</div>", unsafe_allow_html=True)
+
+                rows = []
+                for rank, r in enumerate(batch_results, start=1):
+                    rows.append(
+                        {
+                            "Rank": rank,
+                            "File": r.get("file_name", f"Candidate {rank}"),
+                            "Fit label": r["fit"]["label_name"],
+                            "Final score (%)": round(r["final_score"] * 100, 1),
+                            "P(Good Fit)": round(r["prob_good_fit"], 3),
+                            "Similarity": round(r["similarity"], 3),
+                            "Keyword score": round(r["keyword_score"], 3),
+                        }
+                    )
+
+                st.dataframe(rows, use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                top = batch_results[0]
+                st.markdown("<div class='section-title'>Top candidate highlight</div>", unsafe_allow_html=True)
+                st.write(f"**File:** {top.get('file_name', 'N/A')}")
+                st.write(f"**Final score:** {top['final_score']*100:.1f}%")
+                st.write(f"**Fit label:** {top['fit']['label_name']}")
+                st.write(f"**Highlight:** {top['highlight']}")
+
+                with st.expander("View all candidate highlights"):
+                    for r in batch_results:
+                        st.markdown(f"**{r.get('file_name', 'Candidate')}**")
+                        st.write(
+                            f"- Final score: {r['final_score']*100:.1f}% "
+                            f"(label: {r['fit']['label_name']})"
                         )
+                        st.write(f"- Highlight: {r['highlight']}")
+                        st.write("---")
 
-                    st.dataframe(table_rows, use_container_width=True)
-
-                    names = [
-                        r.get("file_name", f"Candidate {i+1}")
-                        for i, r in enumerate(batch_results)
-                    ]
-                    selected_name = st.selectbox(
-                        "View details for candidate:",
-                        names,
-                        index=0,
-                    )
-
-                    selected = next(
-                        (r for r in batch_results if r.get("file_name") == selected_name),
-                        batch_results[0],
-                    )
-
-                    st.markdown("##### Candidate highlight & details")
-                    st.markdown('<div class="score-card">', unsafe_allow_html=True)
-                    st.write(f"**File:** {selected.get('file_name', 'N/A')}")
-                    st.write(f"**Final score:** {selected['final_score']*100:.1f}%")
-                    st.write(f"**Fit label:** {selected['fit']['label_name']}")
-                    st.write(f"**Highlight:** {selected['highlight']}")
-                    st.markdown("</div>", unsafe_allow_html=True)
-
-                    with st.expander("View model-driven details for selected candidate"):
-                        st.write("**JD summary:**")
-                        st.write(selected["jd"]["summary"])
-                        st.write("**Resume summary:**")
-                        st.write(selected["resume"]["summary"])
-                        st.write("**Extracted organisations (top 5):**")
-                        st.write(selected["resume"]["entities"].get("ORG", [])[:5])
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
 # END
