@@ -22,7 +22,7 @@ import docx2txt
 
 st.set_page_config(
     page_title="MatchAI: Candidate Suitability Screening",
-    page_icon="🧩",
+    page_icon="🔍",
     layout="wide",
 )
 
