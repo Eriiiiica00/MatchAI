@@ -5,7 +5,9 @@ torch
 numpy
 PyPDF2
 docx2txt
-requests
+pandas
+scikit-learn
 huggingface-hub
 tokenizers
 safetensors
+requests
