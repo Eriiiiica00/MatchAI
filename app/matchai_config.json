@@ -1,6 +1,6 @@
 {
   "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
-  "summarization_model": "sshleifer/distilbart-cnn-12-6",
+  "summarization_model": "sshleifer/distilbart-cnn-6-6",
   "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
   "ner_model": "dslim/bert-base-NER",
   "weights": {
