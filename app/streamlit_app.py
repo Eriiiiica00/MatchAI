@@ -540,7 +540,6 @@ with st.container():
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # We no longer try to force-write into the text area; just show info.
         if uploaded_file is not None:
             st.info(f"File uploaded: {uploaded_file.name[:60]}")
 
@@ -563,11 +562,11 @@ with st.container():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Clear button – just reruns script so widgets reset
+    # Clear button – reruns script so widgets reset
     clear_col, _ = st.columns([0.2, 0.8])
     with clear_col:
         if st.button("Clear inputs"):
-            st.experimental_rerun()
+            st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -650,9 +649,9 @@ with st.container():
             st.session_state.w_clf = DEFAULT_WEIGHTS["classifier"]
             st.session_state.w_sim = DEFAULT_WEIGHTS["similarity"]
             st.session_state.w_kw = DEFAULT_WEIGHTS["keywords"]
-            st.experimental_rerun()
+            st.rerun()
 
-    # Safety: if this code path hasn't run yet for some reason
+    # Safety: if this code path hasn't run yet
     if "weights" not in locals():
         weights = DEFAULT_WEIGHTS
 
@@ -668,23 +667,26 @@ with st.container():
     # ---------------- SINGLE MODE RESULT ----------------
     if single_btn:
         if mode != "Single candidate":
-            st.error("Single mode is selected by the button, but UI is in batch mode. Please switch mode to Single candidate.")
+            st.error(
+                "Single mode is selected by the button, but UI is in batch mode. "
+                "Please switch mode to Single candidate."
+            )
         elif not jd_text.strip():
             st.error("Please provide a job description in the Inputs section.")
         else:
             # For single candidate: use resume_text if provided, otherwise try file extraction
             res_source_text = resume_text
-            if not res_source_text.strip() and uploaded_file is not None:
-                # extract text now
-                if uploaded_file.type == "application/pdf":
-                    res_source_text = extract_text_from_pdf(uploaded_file.read())
-                elif uploaded_file.type in [
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    "application/msword",
-                ]:
-                    res_source_text = extract_text_from_docx(uploaded_file.read())
-                else:
-                    res_source_text = uploaded_file.read().decode("utf-8", errors="ignore")
+            if not res_source_text.strip():
+                if "uploaded_file" in locals() and uploaded_file is not None:
+                    if uploaded_file.type == "application/pdf":
+                        res_source_text = extract_text_from_pdf(uploaded_file.read())
+                    elif uploaded_file.type in [
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "application/msword",
+                    ]:
+                        res_source_text = extract_text_from_docx(uploaded_file.read())
+                    else:
+                        res_source_text = uploaded_file.read().decode("utf-8", errors="ignore")
 
             if not res_source_text.strip():
                 st.error("Please provide resume text or upload a readable file.")
@@ -736,7 +738,10 @@ with st.container():
     # ---------------- BATCH MODE RESULT ----------------
     if batch_btn:
         if mode != "Batch (multiple resumes)":
-            st.error("Batch mode is selected by the button, but UI is in single mode. Please switch mode to Batch (multiple resumes).")
+            st.error(
+                "Batch mode is selected by the button, but UI is in single mode. "
+                "Please switch mode to Batch (multiple resumes)."
+            )
         elif not jd_text.strip():
             st.error("Please provide a job description in the Inputs section.")
         elif not uploaded_files:
