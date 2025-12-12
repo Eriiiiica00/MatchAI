@@ -10,4 +10,3 @@ tokenizers
 safetensors
 requests
 pandas
-scikit-learn
