@@ -139,7 +139,7 @@ st.markdown(
         border-color: #c7c7cc !important;
     }
 
-    /* Try to harmonise file uploader button */
+    /* Make file uploader text a bit cleaner */
     .stFileUploader > label div {
         font-size: 0.9rem;
     }
@@ -194,7 +194,7 @@ def load_matchai_config(path: str | None = None):
 def load_models_and_pipelines(cfg: dict):
     """
     Load classifier, summariser, and embedding model.
-    NER was removed to reduce memory usage.
+    (NER removed to save memory.)
     """
     hf_token = st.secrets.get("HF_TOKEN", None) or os.getenv("HF_TOKEN", None)
 
@@ -225,8 +225,8 @@ def load_models_and_pipelines(cfg: dict):
 
 
 config = load_matchai_config()
-clf_tokenizer, clf_model, summarizer, sim_model, label_id2name = (
-    load_models_and_pipelines(config)
+clf_tokenizer, clf_model, summarizer, sim_model, label_id2name = load_models_and_pipelines(
+    config
 )
 
 DEFAULT_WEIGHTS = config.get(
@@ -314,7 +314,6 @@ def process_job_description(jd_text: str):
 
 def process_resume(res_text: str):
     summary = summarize_text(res_text)
-    # NER removed – keep the structure minimal
     return {"raw": res_text, "summary": summary}
 
 
@@ -335,7 +334,6 @@ def generate_candidate_highlights(result_dict: dict) -> str:
     score_pct = result_dict["final_score"] * 100
     sim = result_dict["similarity"]
     kw = result_dict["keyword_score"]
-    jd_summary = result_dict["jd"]["summary"]
     res_summary = result_dict["resume"]["summary"]
     res_lower = res_summary.lower()
 
@@ -470,11 +468,6 @@ def map_priority(score: float) -> str:
         return "Interview priority: LOW"
 
 
-def clear_all_inputs():
-    for key in ["jd_text", "resume_text", "uploaded_files"]:
-        if key in st.session_state:
-            del st.session_state[key]
-
 # ============================================================
 # 3. HEADER
 # ============================================================
@@ -493,16 +486,17 @@ with st.container():
     st.markdown("<div class='round-card'>", unsafe_allow_html=True)
     st.markdown("<div class='soft-label'>INPUTS</div>", unsafe_allow_html=True)
 
+    # --- Job description ---
     st.markdown("<div class='section-title'>Job description</div>", unsafe_allow_html=True)
     st.markdown("<div class='io-box pill-input'>", unsafe_allow_html=True)
     jd_text = st.text_area(
         "",
-        key="jd_text",
         height=230,
         placeholder="Paste the job description here...",
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # --- Candidate mode ---
     st.markdown("<div class='section-title'>Candidate resumes</div>", unsafe_allow_html=True)
     c_mode, c_hint = st.columns([0.45, 0.55])
     with c_mode:
@@ -511,7 +505,6 @@ with st.container():
             ["Single candidate", "Batch (multiple resumes)"],
             horizontal=True,
             label_visibility="collapsed",
-            key="mode",
         )
     with c_hint:
         if mode == "Single candidate":
@@ -524,6 +517,9 @@ with st.container():
                 "<div class='muted' style='margin-top:0.3rem;'>Upload multiple resumes (max 30 per batch). PDFs, Word, or text.</div>",
                 unsafe_allow_html=True,
             )
+
+    resume_text = ""
+    uploaded_files = None
 
     if mode == "Single candidate":
         st.markdown("<div class='io-box'>", unsafe_allow_html=True)
@@ -539,27 +535,14 @@ with st.container():
         st.markdown("<div class='pill-input'>", unsafe_allow_html=True)
         resume_text = st.text_area(
             "",
-            key="resume_text",
             height=220,
             placeholder="Paste resume text here...",
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # We no longer try to force-write into the text area; just show info.
         if uploaded_file is not None:
-            if uploaded_file.type == "application/pdf":
-                extracted = extract_text_from_pdf(uploaded_file.read())
-            elif uploaded_file.type in [
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "application/msword",
-            ]:
-                extracted = extract_text_from_docx(uploaded_file.read())
-            else:
-                extracted = uploaded_file.read().decode("utf-8", errors="ignore")
-
-            if extracted and not resume_text.strip():
-                # Just update local text; avoid directly writing to session_state
-                resume_text = extracted
-                st.info(f"Text extracted from: {uploaded_file.name[:40]}")
+            st.info(f"File uploaded: {uploaded_file.name[:60]}")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -571,7 +554,6 @@ with st.container():
             "Upload multiple resumes",
             type=["pdf", "docx", "txt"],
             accept_multiple_files=True,
-            key="uploaded_files",
             label_visibility="collapsed",
         )
         st.markdown("</div>", unsafe_allow_html=True)
@@ -581,11 +563,10 @@ with st.container():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Clear button – aligned to left within the card
+    # Clear button – just reruns script so widgets reset
     clear_col, _ = st.columns([0.2, 0.8])
     with clear_col:
         if st.button("Clear inputs"):
-            clear_all_inputs()
             st.experimental_rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -613,7 +594,7 @@ with st.container():
                 "Weights can be adjusted below to reflect different HR priorities."
             )
 
-    # Weights expander – close to score explanation
+    # Weights expander – only thing that still uses session_state
     with st.expander("Adjust scoring weights (optional)"):
         st.caption("Weights are normalised automatically. Reset to return to defaults.")
 
@@ -671,7 +652,7 @@ with st.container():
             st.session_state.w_kw = DEFAULT_WEIGHTS["keywords"]
             st.experimental_rerun()
 
-    # Safety: if expander not opened yet, ensure weights exist
+    # Safety: if this code path hasn't run yet for some reason
     if "weights" not in locals():
         weights = DEFAULT_WEIGHTS
 
@@ -686,70 +667,83 @@ with st.container():
 
     # ---------------- SINGLE MODE RESULT ----------------
     if single_btn:
-        jd_val = st.session_state.get("jd_text", "")
-        resume_val = st.session_state.get("resume_text", "")
-
-        if not jd_val.strip():
+        if mode != "Single candidate":
+            st.error("Single mode is selected by the button, but UI is in batch mode. Please switch mode to Single candidate.")
+        elif not jd_text.strip():
             st.error("Please provide a job description in the Inputs section.")
-        elif not resume_val.strip():
-            st.error("Please provide resume text or upload a file in the Inputs section.")
         else:
-            with st.spinner("Evaluating candidate..."):
-                result = evaluate_candidate(jd_val, resume_val, weights)
+            # For single candidate: use resume_text if provided, otherwise try file extraction
+            res_source_text = resume_text
+            if not res_source_text.strip() and uploaded_file is not None:
+                # extract text now
+                if uploaded_file.type == "application/pdf":
+                    res_source_text = extract_text_from_pdf(uploaded_file.read())
+                elif uploaded_file.type in [
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/msword",
+                ]:
+                    res_source_text = extract_text_from_docx(uploaded_file.read())
+                else:
+                    res_source_text = uploaded_file.read().decode("utf-8", errors="ignore")
 
-            score = result["final_score"]
-            score_pct = score * 100
-            label = result["fit"]["label_name"]
-            prob_good = result["prob_good_fit"]
+            if not res_source_text.strip():
+                st.error("Please provide resume text or upload a readable file.")
+            else:
+                with st.spinner("Evaluating candidate..."):
+                    result = evaluate_candidate(jd_text, res_source_text, weights)
 
-            st.markdown("<div class='io-box'>", unsafe_allow_html=True)
-            st.markdown("<div class='section-title'>Result – Single candidate</div>", unsafe_allow_html=True)
-            st.markdown(
-                f"<p class='soft-label'>Final suitability score</p>"
-                f"<p class='score-number'>{score_pct:.1f}%</p>",
-                unsafe_allow_html=True,
-            )
-            st.write(f"**Predicted fit label:** {label}")
-            st.write(f"**P(Good Fit):** {prob_good:.2f}")
-            st.write(f"**{map_priority(score)}**")
-            st.write(f"**Highlight:** {result['highlight']}")
-            st.markdown("</div>", unsafe_allow_html=True)
+                score = result["final_score"]
+                score_pct = score * 100
+                label = result["fit"]["label_name"]
+                prob_good = result["prob_good_fit"]
 
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
-                st.write("**Semantic similarity**")
-                st.write(f"{result['similarity']:.3f}")
+                st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+                st.markdown("<div class='section-title'>Result – Single candidate</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<p class='soft-label'>Final suitability score</p>"
+                    f"<p class='score-number'>{score_pct:.1f}%</p>",
+                    unsafe_allow_html=True,
+                )
+                st.write(f"**Predicted fit label:** {label}")
+                st.write(f"**P(Good Fit):** {prob_good:.2f}")
+                st.write(f"**{map_priority(score)}**")
+                st.write(f"**Highlight:** {result['highlight']}")
                 st.markdown("</div>", unsafe_allow_html=True)
-            with m2:
-                st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
-                st.write("**Keyword coverage**")
-                st.write(f"{result['keyword_score']:.3f}")
-                st.markdown("</div>", unsafe_allow_html=True)
-            with m3:
-                st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
-                st.write("**Model fit confidence**")
-                st.write(f"{prob_good:.3f}")
-                st.markdown("</div>", unsafe_allow_html=True)
 
-            with st.expander("Model-driven details"):
-                st.write("**JD summary**")
-                st.write(result["jd"]["summary"])
-                st.write("**Resume summary**")
-                st.write(result["resume"]["summary"])
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
+                    st.write("**Semantic similarity**")
+                    st.write(f"{result['similarity']:.3f}")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                with m2:
+                    st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
+                    st.write("**Keyword coverage**")
+                    st.write(f"{result['keyword_score']:.3f}")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                with m3:
+                    st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
+                    st.write("**Model fit confidence**")
+                    st.write(f"{prob_good:.3f}")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                with st.expander("Model-driven details"):
+                    st.write("**JD summary**")
+                    st.write(result["jd"]["summary"])
+                    st.write("**Resume summary**")
+                    st.write(result["resume"]["summary"])
 
     # ---------------- BATCH MODE RESULT ----------------
     if batch_btn:
-        jd_val = st.session_state.get("jd_text", "")
-        uploaded_files_val = st.session_state.get("uploaded_files", None)
-
-        if not jd_val.strip():
+        if mode != "Batch (multiple resumes)":
+            st.error("Batch mode is selected by the button, but UI is in single mode. Please switch mode to Batch (multiple resumes).")
+        elif not jd_text.strip():
             st.error("Please provide a job description in the Inputs section.")
-        elif not uploaded_files_val:
+        elif not uploaded_files:
             st.error("Please upload at least one resume file in the Inputs section.")
         else:
             resumes_list = []
-            for f in uploaded_files_val:
+            for f in uploaded_files:
                 if f.type == "application/pdf":
                     text = extract_text_from_pdf(f.read())
                 elif f.type in [
@@ -767,7 +761,7 @@ with st.container():
                 st.error("No readable text found in uploaded resumes.")
             else:
                 with st.spinner("Evaluating all candidates..."):
-                    batch_results = evaluate_batch(jd_val, resumes_list, weights)
+                    batch_results = evaluate_batch(jd_text, resumes_list, weights)
 
                 st.markdown("<div class='io-box'>", unsafe_allow_html=True)
                 st.markdown("<div class='section-title'>Result – Batch candidate ranking</div>", unsafe_allow_html=True)
