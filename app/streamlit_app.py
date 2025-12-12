@@ -47,9 +47,7 @@ st.markdown(
                      "Helvetica Neue", Arial, sans-serif;
     }
 
-    .main {
-        background-color: var(--bg-main);
-    }
+    .main { background-color: var(--bg-main); }
 
     .block-container {
         padding-top: 1rem !important;
@@ -152,16 +150,16 @@ try:
 except Exception:
     pass
 
+# Ensure nonce exists early (used to reset uploaders)
+if "uploader_nonce" not in st.session_state:
+    st.session_state["uploader_nonce"] = 0
+
 # ============================================================
-# 1. LOAD CONFIG & MODELS (NO NER – to save memory)
+# 1. LOAD CONFIG & MODELS (Classifier + Summarizer + NER + Embeddings)
 # ============================================================
 
 @st.cache_resource
 def load_matchai_config(path: str | None = None):
-    """
-    Load matchai_config.json from the same folder as streamlit_app.py
-    so it works both locally and on Streamlit Cloud.
-    """
     if path is None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         path = os.path.join(base_dir, "matchai_config.json")
@@ -175,12 +173,11 @@ def load_matchai_config(path: str | None = None):
             "Could not load matchai_config.json.\n"
             f"Using fallback config for demo. Error: {e}"
         )
-        # Fallback config (2-class SST model – just for pipeline testing)
         return {
             "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
-            # lighter summarizer than 12-6
             "summarization_model": "sshleifer/distilbart-cnn-12-6",
             "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+            "ner_model": "dslim/bert-base-NER",
             "weights": {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2},
             "label_id2name": {"0": "Not Fit", "1": "Good Fit"},
         }
@@ -208,6 +205,13 @@ def load_models_and_pipelines(cfg: dict):
 
         sim_model = SentenceTransformer(cfg["embedding_model"], token=hf_token)
 
+        ner_pipe = hf_pipeline(
+            "ner",
+            model=cfg["ner_model"],
+            grouped_entities=True,
+            token=hf_token,
+        )
+
     except Exception as e:
         st.error("❌ MatchAI couldn’t download one of the Hugging Face models.")
         st.write(
@@ -224,11 +228,10 @@ def load_models_and_pipelines(cfg: dict):
     raw_map = cfg.get("label_id2name", {"0": "No Fit", "1": "Potential Fit", "2": "Good Fit"})
     label_id2name = {int(k): v for k, v in raw_map.items()}
 
-    return clf_tokenizer, clf_model, summarizer, sim_model, label_id2name
-
+    return clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name
 
 config = load_matchai_config()
-clf_tokenizer, clf_model, summarizer, sim_model, label_id2name = load_models_and_pipelines(config)
+clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name = load_models_and_pipelines(config)
 
 DEFAULT_WEIGHTS = config.get("weights", {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2})
 
@@ -267,9 +270,6 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
         return ""
 
 def summarize_text(text: str, max_len: int = 150) -> str:
-    """
-    Keep summarizer usage bounded to reduce latency/memory.
-    """
     if not text or not isinstance(text, str):
         return ""
     truncated = text[:2200]
@@ -282,7 +282,6 @@ def summarize_text(text: str, max_len: int = 150) -> str:
         )[0]["summary_text"]
         return _clean_spaces(out)
     except Exception:
-        # Fail-safe: return a trimmed excerpt
         return _clean_spaces(truncated[:350])
 
 def compute_similarity(text1: str, text2: str) -> float:
@@ -317,7 +316,6 @@ def _tokens(text: str) -> list[str]:
     t = (text or "").lower()
     t = t.translate(str.maketrans("", "", string.punctuation))
     parts = [p.strip() for p in t.split() if p.strip()]
-    # keep informative tokens
     keep = [
         p for p in parts
         if len(p) >= 4 and p not in STOPWORDS and not p.isdigit()
@@ -329,19 +327,57 @@ def _top_keywords_from_text(text: str, k: int = 18) -> list[str]:
     freq: dict[str, int] = {}
     for w in toks:
         freq[w] = freq.get(w, 0) + 1
-    # sort by freq desc, then alphabetically
     ranked = sorted(freq.items(), key=lambda x: (-x[1], x[0]))
     return [w for w, _ in ranked[:k]]
 
+def _dedupe_entities(items: list[str]) -> list[str]:
+    """
+    Clean NER artifacts (subwords, punctuation), dedupe, keep meaningful strings.
+    """
+    cleaned = []
+    seen = set()
+    for x in items or []:
+        x = _clean_spaces(x.replace("##", ""))
+        x = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", x)
+        if len(x) < 2:
+            continue
+        if x.lower() in seen:
+            continue
+        # Avoid junk tokens
+        if x.lower() in {"ca", "hk", "asia", "finance"}:
+            # keep only if part of a longer org, not standalone noise
+            continue
+        seen.add(x.lower())
+        cleaned.append(x)
+    return cleaned
+
+def extract_entities(resume_text: str) -> dict:
+    if not resume_text:
+        return {"ORG": [], "PER": [], "LOC": []}
+    try:
+        ents = ner_pipe(resume_text[:1800])
+        buckets = {"ORG": [], "PER": [], "LOC": []}
+        for e in ents:
+            label = e.get("entity_group")
+            word = (e.get("word") or "").strip()
+            if label in buckets and word:
+                buckets[label].append(word)
+        buckets["ORG"] = _dedupe_entities(buckets["ORG"])
+        buckets["PER"] = _dedupe_entities(buckets["PER"])
+        buckets["LOC"] = _dedupe_entities(buckets["LOC"])
+        return buckets
+    except Exception:
+        return {"ORG": [], "PER": [], "LOC": []}
+
 def process_job_description(jd_text: str):
     summary = summarize_text(jd_text, max_len=140)
-    # keywords from BOTH raw and summary improves coverage
     kw = _top_keywords_from_text(jd_text + " " + summary, k=22)
     return {"raw": jd_text, "summary": summary, "keywords": kw}
 
 def process_resume(res_text: str):
     summary = summarize_text(res_text, max_len=140)
-    return {"raw": res_text, "summary": summary}
+    entities = extract_entities(res_text)
+    return {"raw": res_text, "summary": summary, "entities": entities}
 
 def keyword_match_score(jd_keywords, resume_text_or_summary: str) -> float:
     if not jd_keywords:
@@ -351,7 +387,6 @@ def keyword_match_score(jd_keywords, resume_text_or_summary: str) -> float:
     return hits / len(jd_keywords)
 
 def _extract_years(resume_raw: str) -> int | None:
-    # e.g., "5 years", "7+ yrs", "10+ years"
     patterns = re.findall(r"(\d{1,2})\s*\+?\s*(?:years|yrs)\b", (resume_raw or "").lower())
     if not patterns:
         return None
@@ -372,16 +407,9 @@ def _extract_linkedin(resume_raw: str) -> str | None:
     return m.group(1) if m else None
 
 def _best_resume_snippets(resume_raw: str, jd_keywords: list[str], top_n: int = 2) -> list[str]:
-    """
-    Pick real lines/sentences from resume that match the JD keywords most.
-    This makes highlights feel genuinely grounded in the resume.
-    """
     if not resume_raw or not jd_keywords:
         return []
-
-    # split into lines first (works better for resumes)
     lines = [l.strip() for l in re.split(r"[\n\r]+", resume_raw) if l.strip()]
-    # also consider sentence splits for long paragraphs
     if len(lines) < 10:
         lines = re.split(r"(?<=[.!?])\s+", resume_raw)
 
@@ -410,13 +438,6 @@ def _best_resume_snippets(resume_raw: str, jd_keywords: list[str], top_n: int = 
     return snippets
 
 def generate_candidate_highlights(result_dict: dict) -> str:
-    """
-    More insightful + natural highlight:
-    - Verdict + why
-    - Matched vs missing keywords
-    - Real resume snippets most relevant to the JD
-    - Quick extracted signals (years/email/linkedin) when present
-    """
     label = result_dict["fit"]["label_name"]
     score_pct = result_dict["final_score"] * 100
     sim = result_dict["similarity"]
@@ -425,8 +446,8 @@ def generate_candidate_highlights(result_dict: dict) -> str:
     jd_keywords = result_dict["jd"]["keywords"]
     resume_raw = result_dict["resume"]["raw"]
     resume_summary = result_dict["resume"]["summary"]
+    ents = result_dict["resume"].get("entities", {"ORG": [], "PER": [], "LOC": []})
 
-    # matched / missing
     resume_token_set = set(_tokens(resume_raw + " " + resume_summary))
     matched = [k for k in jd_keywords if k in resume_token_set]
     missing = [k for k in jd_keywords if k not in resume_token_set]
@@ -437,10 +458,8 @@ def generate_candidate_highlights(result_dict: dict) -> str:
     years = _extract_years(resume_raw)
     email = _extract_email(resume_raw)
     linkedin = _extract_linkedin(resume_raw)
-
     snippets = _best_resume_snippets(resume_raw, jd_keywords, top_n=2)
 
-    # verdict tone
     if score_pct >= 80:
         verdict = "Strong match"
     elif score_pct >= 60:
@@ -449,7 +468,6 @@ def generate_candidate_highlights(result_dict: dict) -> str:
         verdict = "Needs review"
 
     reasons = []
-    # Keep reasons human-readable
     if sim >= 0.8:
         reasons.append("resume content aligns closely with the JD")
     elif sim >= 0.65:
@@ -460,18 +478,21 @@ def generate_candidate_highlights(result_dict: dict) -> str:
     elif kw >= 0.4:
         reasons.append("some key requirements are mentioned")
 
-    # Compose highlight
     parts = []
     parts.append(f"**{verdict} ({score_pct:.1f}% • {label})**")
     if reasons:
         parts.append("Why: " + "; ".join(reasons) + ".")
+
+    if ents.get("ORG"):
+        parts.append("Notable organisations: " + ", ".join(ents["ORG"][:4]) + ".")
+    if ents.get("LOC"):
+        parts.append("Locations mentioned: " + ", ".join(ents["LOC"][:3]) + ".")
 
     if matched_top:
         parts.append("Matched keywords: " + ", ".join(matched_top) + ".")
     if missing_top and score_pct < 85:
         parts.append("Missing / not obvious: " + ", ".join(missing_top) + ".")
 
-    # snippets grounded in resume
     if snippets:
         if len(snippets) == 1:
             parts.append("Resume evidence: “" + snippets[0] + "”")
@@ -480,7 +501,6 @@ def generate_candidate_highlights(result_dict: dict) -> str:
             parts.append(f"- “{snippets[0]}”")
             parts.append(f"- “{snippets[1]}”")
 
-    # quick signals (optional)
     extras = []
     if years is not None and years >= 2:
         extras.append(f"{years}+ years mentioned")
@@ -501,14 +521,12 @@ def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
     sim_raw = compute_similarity(jd["summary"], res["summary"])
     sim_norm = (sim_raw + 1) / 2 if sim_raw < 1 else min(sim_raw, 1.0)
 
-    # keyword coverage should use raw+summary for better detection
     kw_score = keyword_match_score(jd["keywords"], res["raw"] + " " + res["summary"])
 
     fit = predict_fit_label(jd_text, res_text)
     if len(fit["probs"]) >= 3:
         prob_good_fit = fit["probs"][2]
     else:
-        # 2-class fallback: treat predicted class prob as "confidence"
         prob_good_fit = fit["probs"][fit["label_id"]]
 
     final_score = (
@@ -550,12 +568,11 @@ def map_priority(score: float) -> str:
     else:
         return "Interview priority: LOW"
 
-# ---------- Upload handlers + clear ----------
+# ---------- Upload reading ----------
 
 def _read_uploaded_file(uploaded) -> str:
     if uploaded is None:
         return ""
-    # NOTE: uploaded is an UploadedFile which behaves like a stream
     data = uploaded.read()
     if uploaded.type == "application/pdf":
         return extract_text_from_pdf(data)
@@ -569,45 +586,33 @@ def _read_uploaded_file(uploaded) -> str:
     except Exception:
         return ""
 
-def on_single_upload_change():
-    """
-    Called when file uploader changes.
-    Safe place to update st.session_state for resume_text.
-    """
-    up = st.session_state.get("single_upload", None)
-    if up is None:
-        return
+# ============================================================
+# ✅ NEW EVALUATION (Safe reset)
+# ============================================================
 
-    extracted = _read_uploaded_file(up)
-    # Fill text only if empty (don’t overwrite what user typed)
-    if extracted and not st.session_state.get("resume_text", "").strip():
-        st.session_state["resume_text"] = extracted
-        st.session_state["upload_note"] = f"Text extracted from: {getattr(up, 'name', '')[:40]}"
-    elif extracted:
-        st.session_state["upload_note"] = f"Text extracted from: {getattr(up, 'name', '')[:40]}"
-
-def clear_all_inputs():
+def new_evaluation():
     """
-    Clears JD + resume + uploads + outputs.
-    For uploads: change uploader keys by bumping a nonce.
+    Safe reset:
+    - clears text inputs + notes
+    - clears cached results
+    - resets candidate selection
+    - bumps uploader_nonce so upload widgets reset
+    - reruns
     """
+    # clear text state (safe because done via on_click before widgets render next run)
     st.session_state["jd_text"] = ""
     st.session_state["resume_text"] = ""
     st.session_state["upload_note"] = ""
     st.session_state["active_candidate_idx"] = 0
 
-    # Clear results (so it doesn't look "uncleared")
+    # clear results
     st.session_state.pop("last_single_result", None)
     st.session_state.pop("last_batch_results", None)
 
-    # Reset weights UI values (optional)
-    st.session_state["w_clf"] = DEFAULT_WEIGHTS["classifier"]
-    st.session_state["w_sim"] = DEFAULT_WEIGHTS["similarity"]
-    st.session_state["w_kw"] = DEFAULT_WEIGHTS["keywords"]
-
-    # Most important: bump uploader nonce so file_uploader widgets reset
+    # bump nonce -> resets upload widgets
     st.session_state["uploader_nonce"] = st.session_state.get("uploader_nonce", 0) + 1
 
+    # optional: keep weights as user last set (do NOT reset)
     st.rerun()
 
 # ============================================================
@@ -619,10 +624,6 @@ st.markdown(
     "<span class='muted'>Screen and prioritise candidates against a specific job description.</span>",
     unsafe_allow_html=True,
 )
-
-# Ensure nonce exists
-if "uploader_nonce" not in st.session_state:
-    st.session_state["uploader_nonce"] = 0
 
 # ============================================================
 # 4. INPUTS CARD (FULL-WIDTH ROW)
@@ -668,20 +669,23 @@ with st.container():
         st.markdown("<div class='io-box'>", unsafe_allow_html=True)
         st.markdown("<div class='pill-upload'>", unsafe_allow_html=True)
 
-        # Key includes nonce so Clear inputs truly resets uploader
         uploaded_file = st.file_uploader(
             "Upload resume (PDF / Word / TXT, optional)",
             type=["pdf", "docx", "txt"],
             accept_multiple_files=False,
             label_visibility="collapsed",
             key=f"single_upload_{st.session_state['uploader_nonce']}",
-            on_change=on_single_upload_change,
         )
-        # NOTE: because we used dynamic key, read the real object from session_state:
-        # In on_change, we used "single_upload" -> so we also set an alias here:
-        st.session_state["single_upload"] = uploaded_file
 
         st.markdown("</div>", unsafe_allow_html=True)
+
+        # If file uploaded, read it and populate resume_text ONLY if empty
+        if uploaded_file is not None:
+            extracted = _read_uploaded_file(uploaded_file)
+            if extracted and not st.session_state.get("resume_text", "").strip():
+                st.session_state["resume_text"] = extracted
+            if extracted:
+                st.session_state["upload_note"] = f"Text extracted from: {uploaded_file.name[:40]}"
 
         st.markdown("<div class='pill-input'>", unsafe_allow_html=True)
         resume_text = st.text_area(
@@ -718,11 +722,10 @@ with st.container():
                 st.error(f"Too many files uploaded – maximum {MAX_RESUMES} per batch.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Clear button
-    clear_col, _ = st.columns([0.2, 0.8])
-    with clear_col:
-        if st.button("Clear inputs"):
-            clear_all_inputs()
+    # ✅ Replace Clear inputs with New evaluation (safe reset)
+    btn_col, _ = st.columns([0.25, 0.75])
+    with btn_col:
+        st.button("New evaluation", on_click=new_evaluation)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -749,7 +752,6 @@ with st.container():
                 "Weights can be adjusted below to reflect different HR priorities."
             )
 
-    # Weights expander
     with st.expander("Adjust scoring weights (optional)"):
         st.caption("Weights are normalised automatically. Reset to return to defaults.")
 
@@ -789,7 +791,6 @@ with st.container():
                 key="slider_w_kw",
             )
 
-        # store back
         st.session_state.w_clf = w_clf
         st.session_state.w_sim = w_sim
         st.session_state.w_kw = w_kw
@@ -815,9 +816,7 @@ with st.container():
             st.session_state.w_kw = DEFAULT_WEIGHTS["keywords"]
             st.rerun()
 
-    # Ensure weights exist even if expander never opened
     if "weights" not in locals():
-        # normalise defaults just in case
         tot = DEFAULT_WEIGHTS["classifier"] + DEFAULT_WEIGHTS["similarity"] + DEFAULT_WEIGHTS["keywords"]
         weights = {
             "classifier": DEFAULT_WEIGHTS["classifier"] / tot,
@@ -827,14 +826,12 @@ with st.container():
 
     st.markdown("---")
 
-    # Score buttons near top of evaluation card
     button_row = st.columns([0.35, 0.35, 0.3])
     with button_row[0]:
         single_btn = st.button("🔍 Score single candidate")
     with button_row[1]:
         batch_btn = st.button("🔍 Score candidates (batch)")
 
-    # ---------------- SINGLE MODE RESULT ----------------
     if single_btn:
         jd_val = st.session_state.get("jd_text", "")
         resume_val = st.session_state.get("resume_text", "")
@@ -848,7 +845,6 @@ with st.container():
                 result = evaluate_candidate(jd_val, resume_val, weights)
             st.session_state["last_single_result"] = result
 
-    # Render cached single result (so it stays visible)
     if "last_single_result" in st.session_state:
         result = st.session_state["last_single_result"]
 
@@ -894,13 +890,21 @@ with st.container():
             st.write(result["resume"]["summary"])
             st.write("**JD keywords (top)**")
             st.write(result["jd"]["keywords"][:20])
+            st.write("**Entities (NER)**")
+            st.write(result["resume"].get("entities", {}))
 
-    # ---------------- BATCH MODE RESULT ----------------
     if batch_btn:
         jd_val = st.session_state.get("jd_text", "")
-        # dynamic key means uploader value is in the local variable `uploaded_files` already
-        # but if user didn't scroll back up, it might be None; best effort:
-        batch_files = uploaded_files if mode != "Single candidate" else None
+
+        # Only defined in batch mode path; keep safe:
+        batch_files = None
+        if st.session_state.get("mode") == "Batch (multiple resumes)":
+            # The uploader widget has a dynamic key; Streamlit returns its value already in this run:
+            # We retrieve it by searching session_state for keys starting with "batch_upload_"
+            for k in list(st.session_state.keys()):
+                if k.startswith("batch_upload_"):
+                    batch_files = st.session_state.get(k)
+                    break
 
         if not jd_val.strip():
             st.error("Please provide a job description in the Inputs section.")
@@ -925,7 +929,6 @@ with st.container():
                     st.session_state["last_batch_results"] = batch_results
                     st.session_state["active_candidate_idx"] = 0
 
-    # Render cached batch results
     if "last_batch_results" in st.session_state:
         batch_results = st.session_state["last_batch_results"]
 
@@ -949,14 +952,12 @@ with st.container():
         st.dataframe(rows, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # show top + allow browsing other highlights
         st.markdown("<div class='section-title'>Candidate highlights</div>", unsafe_allow_html=True)
 
         options = [f"{i+1}. {r.get('file_name','Candidate')}" for i, r in enumerate(batch_results)]
-        idx = st.session_state.get("active_candidate_idx", 0)
-        idx = st.selectbox("Select a candidate", options=options, index=min(idx, len(options)-1))
-        # idx is a label string now; parse
-        selected_i = int(str(idx).split(".")[0]) - 1
+        current_i = int(st.session_state.get("active_candidate_idx", 0))
+        label = st.selectbox("Select a candidate", options=options, index=min(current_i, len(options)-1))
+        selected_i = int(str(label).split(".")[0]) - 1
         st.session_state["active_candidate_idx"] = selected_i
 
         sel = batch_results[selected_i]
