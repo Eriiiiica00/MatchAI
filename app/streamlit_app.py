@@ -397,7 +397,6 @@ def generate_candidate_highlights(result_dict: dict) -> str:
         signals.append("background in HR or recruitment")
 
     if signals:
-        # Turn signal list into human sentence
         if len(signals) == 1:
             parts.append(f"The CV indicates {signals[0]}.")
         else:
@@ -405,7 +404,6 @@ def generate_candidate_highlights(result_dict: dict) -> str:
             initial = ", ".join(signals[:-1])
             parts.append(f"The CV indicates {initial}, and {last}.")
 
-    # 4) Fallback if summary is very short
     if not res_summary.strip():
         parts.append(
             "The resume text is limited, so this assessment should be treated as indicative only."
@@ -559,7 +557,7 @@ with st.container():
                 extracted = uploaded_file.read().decode("utf-8", errors="ignore")
 
             if extracted and not resume_text.strip():
-                st.session_state["resume_text"] = extracted
+                # Just update local text; avoid directly writing to session_state
                 resume_text = extracted
                 st.info(f"Text extracted from: {uploaded_file.name[:40]}")
 
