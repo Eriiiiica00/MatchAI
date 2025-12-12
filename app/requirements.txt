@@ -1,13 +1,11 @@
 streamlit
+torch
 transformers
 sentence-transformers
-torch
 numpy
+pandas
 PyPDF2
 docx2txt
-pandas
 scikit-learn
 huggingface-hub
-tokenizers
 safetensors
-requests
