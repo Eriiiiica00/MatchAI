@@ -179,7 +179,7 @@ def load_matchai_config(path: str | None = None):
         return {
             "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
             # lighter summarizer than 12-6
-            "summarization_model": "sshleifer/distilbart-cnn-6-6",
+            "summarization_model": "sshleifer/distilbart-cnn-12-6",
             "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
             "weights": {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2},
             "label_id2name": {"0": "Not Fit", "1": "Good Fit"},
