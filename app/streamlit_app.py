@@ -18,6 +18,7 @@ from torch.nn.functional import softmax, cosine_similarity
 import PyPDF2
 import docx2txt
 
+
 # ============================================================
 # 0. BASIC SETUP & GLOBAL STYLE
 # ============================================================
@@ -28,7 +29,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# Neutral Apple-ish theme: white / light grey only, full-width cards
 st.markdown(
     """
     <style>
@@ -143,19 +143,21 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Keep CPU-friendly defaults on Streamlit Cloud
+# CPU-friendly defaults on Streamlit Cloud
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 try:
     torch.set_num_threads(1)
 except Exception:
     pass
 
-# Ensure nonce exists early (used to reset uploaders)
+# nonce exists early (used to reset uploaders)
 if "uploader_nonce" not in st.session_state:
     st.session_state["uploader_nonce"] = 0
 
+
 # ============================================================
-# 1. LOAD CONFIG & MODELS (Classifier + Summarizer + NER + Embeddings)
+# 1. LOAD CONFIG & MODELS (Classifier + Summarizer + Embeddings)
+#    (NER removed to save memory & improve output relevance)
 # ============================================================
 
 @st.cache_resource
@@ -177,7 +179,6 @@ def load_matchai_config(path: str | None = None):
             "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
             "summarization_model": "sshleifer/distilbart-cnn-12-6",
             "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-            "ner_model": "dslim/bert-base-NER",
             "weights": {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2},
             "label_id2name": {"0": "Not Fit", "1": "Good Fit"},
         }
@@ -205,13 +206,6 @@ def load_models_and_pipelines(cfg: dict):
 
         sim_model = SentenceTransformer(cfg["embedding_model"], token=hf_token)
 
-        ner_pipe = hf_pipeline(
-            "ner",
-            model=cfg["ner_model"],
-            grouped_entities=True,
-            token=hf_token,
-        )
-
     except Exception as e:
         st.error("❌ MatchAI couldn’t download one of the Hugging Face models.")
         st.write(
@@ -228,22 +222,30 @@ def load_models_and_pipelines(cfg: dict):
     raw_map = cfg.get("label_id2name", {"0": "No Fit", "1": "Potential Fit", "2": "Good Fit"})
     label_id2name = {int(k): v for k, v in raw_map.items()}
 
-    return clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name
+    return clf_tokenizer, clf_model, summarizer, sim_model, label_id2name
 
 config = load_matchai_config()
-clf_tokenizer, clf_model, summarizer, sim_model, ner_pipe, label_id2name = load_models_and_pipelines(config)
+clf_tokenizer, clf_model, summarizer, sim_model, label_id2name = load_models_and_pipelines(config)
 
 DEFAULT_WEIGHTS = config.get("weights", {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2})
 
+
 # ============================================================
-# 2. HELPER FUNCTIONS (TEXT, MODELS, SCORING)
+# 2. HELPER FUNCTIONS
 # ============================================================
 
 STOPWORDS = {
     "the","and","for","with","from","that","this","you","your","are","our","will","have",
     "role","work","team","teams","using","use","used","able","must","should","within",
     "include","including","responsibilities","requirements","years","year","experience",
-    "skills","skill","ability","strong","good","excellent","preferred","plus"
+    "skills","skill","ability","strong","good","excellent","preferred","plus","etc"
+}
+
+ACTION_VERBS = {
+    "led","lead","owned","manage","managed","built","build","create","created","design","designed",
+    "implement","implemented","improve","improved","increase","increased","reduce","reduced",
+    "deliver","delivered","launch","launched","optimize","optimized","automate","automated",
+    "analyze","analyzed","drive","drove","scale","scaled","partner","partnered","negotiate","negotiated"
 }
 
 def _clean_spaces(s: str) -> str:
@@ -269,7 +271,10 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
         st.warning(f"Could not read Word file: {e}")
         return ""
 
-def summarize_text(text: str, max_len: int = 150) -> str:
+def summarize_text(text: str, max_len: int = 140) -> str:
+    """
+    Keep summarizer usage bounded.
+    """
     if not text or not isinstance(text, str):
         return ""
     truncated = text[:2200]
@@ -316,58 +321,16 @@ def _tokens(text: str) -> list[str]:
     t = (text or "").lower()
     t = t.translate(str.maketrans("", "", string.punctuation))
     parts = [p.strip() for p in t.split() if p.strip()]
-    keep = [
-        p for p in parts
-        if len(p) >= 4 and p not in STOPWORDS and not p.isdigit()
-    ]
+    keep = [p for p in parts if len(p) >= 4 and p not in STOPWORDS and not p.isdigit()]
     return keep
 
-def _top_keywords_from_text(text: str, k: int = 18) -> list[str]:
+def _top_keywords_from_text(text: str, k: int = 22) -> list[str]:
     toks = _tokens(text)
     freq: dict[str, int] = {}
     for w in toks:
         freq[w] = freq.get(w, 0) + 1
     ranked = sorted(freq.items(), key=lambda x: (-x[1], x[0]))
     return [w for w, _ in ranked[:k]]
-
-def _dedupe_entities(items: list[str]) -> list[str]:
-    """
-    Clean NER artifacts (subwords, punctuation), dedupe, keep meaningful strings.
-    """
-    cleaned = []
-    seen = set()
-    for x in items or []:
-        x = _clean_spaces(x.replace("##", ""))
-        x = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", x)
-        if len(x) < 2:
-            continue
-        if x.lower() in seen:
-            continue
-        # Avoid junk tokens
-        if x.lower() in {"ca", "hk", "asia", "finance"}:
-            # keep only if part of a longer org, not standalone noise
-            continue
-        seen.add(x.lower())
-        cleaned.append(x)
-    return cleaned
-
-def extract_entities(resume_text: str) -> dict:
-    if not resume_text:
-        return {"ORG": [], "PER": [], "LOC": []}
-    try:
-        ents = ner_pipe(resume_text[:1800])
-        buckets = {"ORG": [], "PER": [], "LOC": []}
-        for e in ents:
-            label = e.get("entity_group")
-            word = (e.get("word") or "").strip()
-            if label in buckets and word:
-                buckets[label].append(word)
-        buckets["ORG"] = _dedupe_entities(buckets["ORG"])
-        buckets["PER"] = _dedupe_entities(buckets["PER"])
-        buckets["LOC"] = _dedupe_entities(buckets["LOC"])
-        return buckets
-    except Exception:
-        return {"ORG": [], "PER": [], "LOC": []}
 
 def process_job_description(jd_text: str):
     summary = summarize_text(jd_text, max_len=140)
@@ -376,8 +339,7 @@ def process_job_description(jd_text: str):
 
 def process_resume(res_text: str):
     summary = summarize_text(res_text, max_len=140)
-    entities = extract_entities(res_text)
-    return {"raw": res_text, "summary": summary, "entities": entities}
+    return {"raw": res_text, "summary": summary}
 
 def keyword_match_score(jd_keywords, resume_text_or_summary: str) -> float:
     if not jd_keywords:
@@ -388,8 +350,6 @@ def keyword_match_score(jd_keywords, resume_text_or_summary: str) -> float:
 
 def _extract_years(resume_raw: str) -> int | None:
     patterns = re.findall(r"(\d{1,2})\s*\+?\s*(?:years|yrs)\b", (resume_raw or "").lower())
-    if not patterns:
-        return None
     nums = []
     for p in patterns:
         try:
@@ -398,129 +358,110 @@ def _extract_years(resume_raw: str) -> int | None:
             pass
     return max(nums) if nums else None
 
-def _extract_email(resume_raw: str) -> str | None:
-    m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", resume_raw or "")
-    return m.group(0) if m else None
+def _looks_like_metric(line: str) -> bool:
+    # %, $, numbers, KPI-ish patterns
+    return bool(re.search(r"(\d+%|\$\s?\d+|\b\d+\b|\bKPIs?\b|\bOKRs?\b|\bROI\b|\bDSO\b|\bNPS\b)", line, flags=re.I))
 
-def _extract_linkedin(resume_raw: str) -> str | None:
-    m = re.search(r"(https?://(www\.)?linkedin\.com/[^\s]+)", resume_raw or "", flags=re.I)
-    return m.group(1) if m else None
+def _action_verb_bonus(line: str) -> int:
+    toks = set(_tokens(line))
+    return 1 if any(v in toks for v in ACTION_VERBS) else 0
 
-def _best_resume_snippets(resume_raw: str, jd_keywords: list[str], top_n: int = 2) -> list[str]:
+def extract_evidence_bullets(resume_raw: str, jd_keywords: list[str], top_n: int = 5) -> list[str]:
+    """
+    Pick grounded resume lines as evidence.
+    Scoring: keyword hits + metric bonus + action verb bonus.
+    """
     if not resume_raw or not jd_keywords:
         return []
+
+    # split lines (resumes are line-based)
     lines = [l.strip() for l in re.split(r"[\n\r]+", resume_raw) if l.strip()]
-    if len(lines) < 10:
+    # fallback: sentence split if too few lines
+    if len(lines) < 8:
         lines = re.split(r"(?<=[.!?])\s+", resume_raw)
 
     jd_set = set(jd_keywords)
-    scored: list[tuple[int, str]] = []
+    scored: list[tuple[float, str]] = []
+
     for line in lines:
         line_clean = _clean_spaces(line)
         if len(line_clean) < 25:
             continue
+
         toks = set(_tokens(line_clean))
-        score = sum(1 for kw in jd_set if kw in toks)
-        if score > 0:
-            scored.append((score, line_clean))
+        hit = sum(1 for kw in jd_set if kw in toks)
+
+        if hit == 0:
+            continue
+
+        metric_bonus = 1 if _looks_like_metric(line_clean) else 0
+        verb_bonus = _action_verb_bonus(line_clean)
+        length_penalty = 0.2 if len(line_clean) > 220 else 0.0
+
+        score = hit + metric_bonus + verb_bonus - length_penalty
+        scored.append((score, line_clean))
 
     scored.sort(key=lambda x: (-x[0], len(x[1])))
-    snippets = []
+
+    bullets = []
     seen = set()
     for _, s in scored:
-        s2 = s[:180] + ("…" if len(s) > 180 else "")
-        if s2.lower() in seen:
+        s2 = s[:190] + ("…" if len(s) > 190 else "")
+        key = s2.lower()
+        if key in seen:
             continue
-        seen.add(s2.lower())
-        snippets.append(s2)
-        if len(snippets) >= top_n:
+        seen.add(key)
+        bullets.append(f"“{s2}”")
+        if len(bullets) >= top_n:
             break
-    return snippets
 
-def generate_candidate_highlights(result_dict: dict) -> str:
-    label = result_dict["fit"]["label_name"]
-    score_pct = result_dict["final_score"] * 100
-    sim = result_dict["similarity"]
-    kw = result_dict["keyword_score"]
+    return bullets
 
-    jd_keywords = result_dict["jd"]["keywords"]
-    resume_raw = result_dict["resume"]["raw"]
-    resume_summary = result_dict["resume"]["summary"]
-    ents = result_dict["resume"].get("entities", {"ORG": [], "PER": [], "LOC": []})
+def build_interview_kit(
+    jd_keywords: list[str],
+    matched_keywords: list[str],
+    missing_keywords: list[str],
+    evidence_bullets: list[str],
+    score_pct: float
+) -> list[str]:
+    """
+    Deterministic, recruiter-grade interview kit:
+    - Evidence drill-down
+    - Depth on matched keywords
+    - Gap probes on missing keywords
+    - Risk checks
+    """
+    kit: list[str] = []
 
-    resume_token_set = set(_tokens(resume_raw + " " + resume_summary))
-    matched = [k for k in jd_keywords if k in resume_token_set]
-    missing = [k for k in jd_keywords if k not in resume_token_set]
+    # 1) Evidence drill-down (best)
+    for b in evidence_bullets[:2]:
+        kit.append(f"Deep dive: In the resume you mention {b} — what was your role, what constraints did you face, and how did you measure impact?")
 
-    matched_top = matched[:6]
-    missing_top = missing[:6]
+    # 2) Matched keyword depth
+    for kw in matched_keywords[:2]:
+        kit.append(f"Depth check ({kw}): Walk me through the most complex {kw}-related work you’ve done. What trade-offs did you make and why?")
 
-    years = _extract_years(resume_raw)
-    email = _extract_email(resume_raw)
-    linkedin = _extract_linkedin(resume_raw)
-    snippets = _best_resume_snippets(resume_raw, jd_keywords, top_n=2)
+    # 3) Gap probes
+    for kw in missing_keywords[:2]:
+        kit.append(f"Gap probe ({kw}): This role expects {kw}. What’s your closest comparable experience, and what would you need to ramp up quickly?")
 
-    if score_pct >= 80:
-        verdict = "Strong match"
-    elif score_pct >= 60:
-        verdict = "Promising match"
-    else:
-        verdict = "Needs review"
+    # 4) Risk checks (tailored by score)
+    if score_pct < 60:
+        kit.append("Clarity check: Pick one project you led end-to-end. Explain the goal, your specific contribution, the timeline, and the outcome (with numbers if possible).")
+    kit.append("Stakeholder check: Tell me about a time you had conflicting stakeholders. How did you align them and what was the result?")
 
-    reasons = []
-    if sim >= 0.8:
-        reasons.append("resume content aligns closely with the JD")
-    elif sim >= 0.65:
-        reasons.append("there is moderate alignment with the JD")
-
-    if kw >= 0.6:
-        reasons.append("many key requirements are explicitly mentioned")
-    elif kw >= 0.4:
-        reasons.append("some key requirements are mentioned")
-
-    parts = []
-    parts.append(f"**{verdict} ({score_pct:.1f}% • {label})**")
-    if reasons:
-        parts.append("Why: " + "; ".join(reasons) + ".")
-
-    if ents.get("ORG"):
-        parts.append("Notable organisations: " + ", ".join(ents["ORG"][:4]) + ".")
-    if ents.get("LOC"):
-        parts.append("Locations mentioned: " + ", ".join(ents["LOC"][:3]) + ".")
-
-    if matched_top:
-        parts.append("Matched keywords: " + ", ".join(matched_top) + ".")
-    if missing_top and score_pct < 85:
-        parts.append("Missing / not obvious: " + ", ".join(missing_top) + ".")
-
-    if snippets:
-        if len(snippets) == 1:
-            parts.append("Resume evidence: “" + snippets[0] + "”")
-        else:
-            parts.append("Resume evidence:")
-            parts.append(f"- “{snippets[0]}”")
-            parts.append(f"- “{snippets[1]}”")
-
-    extras = []
-    if years is not None and years >= 2:
-        extras.append(f"{years}+ years mentioned")
-    if linkedin:
-        extras.append("LinkedIn link found")
-    elif email:
-        extras.append("Email found")
-
-    if extras:
-        parts.append("_Quick signals_: " + " • ".join(extras) + ".")
-
-    return "\n".join(parts)
+    # Ensure not too long
+    return kit[:8]
 
 def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
     jd = process_job_description(jd_text)
     res = process_resume(res_text)
 
+    # similarity on summaries (bounded length)
     sim_raw = compute_similarity(jd["summary"], res["summary"])
     sim_norm = (sim_raw + 1) / 2 if sim_raw < 1 else min(sim_raw, 1.0)
 
+    # keyword coverage against raw+summary
     kw_score = keyword_match_score(jd["keywords"], res["raw"] + " " + res["summary"])
 
     fit = predict_fit_label(jd_text, res_text)
@@ -535,7 +476,17 @@ def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
         + weights["keywords"] * kw_score
     )
 
-    result = {
+    # evidence + interview kit (grounded)
+    resume_token_set = set(_tokens(res["raw"] + " " + res["summary"]))
+    matched = [k for k in jd["keywords"] if k in resume_token_set]
+    missing = [k for k in jd["keywords"] if k not in resume_token_set]
+    evidence = extract_evidence_bullets(res["raw"], jd["keywords"], top_n=5)
+    score_pct = float(final_score) * 100.0
+    interview_kit = build_interview_kit(jd["keywords"], matched, missing, evidence, score_pct)
+
+    years = _extract_years(res["raw"])
+
+    return {
         "jd": jd,
         "resume": res,
         "similarity_raw": sim_raw,
@@ -544,9 +495,12 @@ def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
         "fit": fit,
         "prob_good_fit": float(prob_good_fit),
         "final_score": float(final_score),
+        "matched_keywords": matched,
+        "missing_keywords": missing,
+        "evidence_bullets": evidence,
+        "interview_kit": interview_kit,
+        "years_signal": years,
     }
-    result["highlight"] = generate_candidate_highlights(result)
-    return result
 
 def evaluate_batch(jd_text: str, resumes_list: list, weights: dict):
     results = []
@@ -568,8 +522,6 @@ def map_priority(score: float) -> str:
     else:
         return "Interview priority: LOW"
 
-# ---------- Upload reading ----------
-
 def _read_uploaded_file(uploaded) -> str:
     if uploaded is None:
         return ""
@@ -586,6 +538,7 @@ def _read_uploaded_file(uploaded) -> str:
     except Exception:
         return ""
 
+
 # ============================================================
 # ✅ NEW EVALUATION (Safe reset)
 # ============================================================
@@ -599,21 +552,17 @@ def new_evaluation():
     - bumps uploader_nonce so upload widgets reset
     - reruns
     """
-    # clear text state (safe because done via on_click before widgets render next run)
     st.session_state["jd_text"] = ""
     st.session_state["resume_text"] = ""
     st.session_state["upload_note"] = ""
     st.session_state["active_candidate_idx"] = 0
 
-    # clear results
     st.session_state.pop("last_single_result", None)
     st.session_state.pop("last_batch_results", None)
 
-    # bump nonce -> resets upload widgets
     st.session_state["uploader_nonce"] = st.session_state.get("uploader_nonce", 0) + 1
-
-    # optional: keep weights as user last set (do NOT reset)
     st.rerun()
+
 
 # ============================================================
 # 3. HEADER
@@ -624,6 +573,7 @@ st.markdown(
     "<span class='muted'>Screen and prioritise candidates against a specific job description.</span>",
     unsafe_allow_html=True,
 )
+
 
 # ============================================================
 # 4. INPUTS CARD (FULL-WIDTH ROW)
@@ -665,6 +615,8 @@ with st.container():
                 unsafe_allow_html=True,
             )
 
+    uploaded_files = None  # define for safety
+
     if mode == "Single candidate":
         st.markdown("<div class='io-box'>", unsafe_allow_html=True)
         st.markdown("<div class='pill-upload'>", unsafe_allow_html=True)
@@ -676,13 +628,13 @@ with st.container():
             label_visibility="collapsed",
             key=f"single_upload_{st.session_state['uploader_nonce']}",
         )
-
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # If file uploaded, read it and populate resume_text ONLY if empty
+        # Populate resume_text only if empty
         if uploaded_file is not None:
             extracted = _read_uploaded_file(uploaded_file)
             if extracted and not st.session_state.get("resume_text", "").strip():
+                # Safe enough in practice because text_area below reads session_state.
                 st.session_state["resume_text"] = extracted
             if extracted:
                 st.session_state["upload_note"] = f"Text extracted from: {uploaded_file.name[:40]}"
@@ -707,12 +659,13 @@ with st.container():
         MAX_RESUMES = 30
         st.markdown("<div class='pill-upload'>", unsafe_allow_html=True)
 
+        batch_key = f"batch_upload_{st.session_state['uploader_nonce']}"
         uploaded_files = st.file_uploader(
             "Upload multiple resumes",
             type=["pdf", "docx", "txt"],
             accept_multiple_files=True,
             label_visibility="collapsed",
-            key=f"batch_upload_{st.session_state['uploader_nonce']}",
+            key=batch_key,
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -722,12 +675,13 @@ with st.container():
                 st.error(f"Too many files uploaded – maximum {MAX_RESUMES} per batch.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ✅ Replace Clear inputs with New evaluation (safe reset)
+    # New evaluation button
     btn_col, _ = st.columns([0.25, 0.75])
     with btn_col:
         st.button("New evaluation", on_click=new_evaluation)
 
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 # ============================================================
 # 5. EVALUATION & RESULTS CARD (FULL-WIDTH ROW)
@@ -752,8 +706,9 @@ with st.container():
                 "Weights can be adjusted below to reflect different HR priorities."
             )
 
+    # weights expander (normalised to 100% automatically)
     with st.expander("Adjust scoring weights (optional)"):
-        st.caption("Weights are normalised automatically. Reset to return to defaults.")
+        st.caption("Weights are normalised automatically.")
 
         if "w_clf" not in st.session_state:
             st.session_state.w_clf = DEFAULT_WEIGHTS["classifier"]
@@ -764,32 +719,11 @@ with st.container():
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            w_clf = st.slider(
-                "Weight: P(Good Fit)",
-                0.0,
-                1.0,
-                float(st.session_state.w_clf),
-                0.05,
-                key="slider_w_clf",
-            )
+            w_clf = st.slider("Weight: P(Good Fit)", 0.0, 1.0, float(st.session_state.w_clf), 0.05, key="slider_w_clf")
         with c2:
-            w_sim = st.slider(
-                "Weight: Similarity",
-                0.0,
-                1.0,
-                float(st.session_state.w_sim),
-                0.05,
-                key="slider_w_sim",
-            )
+            w_sim = st.slider("Weight: Similarity", 0.0, 1.0, float(st.session_state.w_sim), 0.05, key="slider_w_sim")
         with c3:
-            w_kw = st.slider(
-                "Weight: Keywords",
-                0.0,
-                1.0,
-                float(st.session_state.w_kw),
-                0.05,
-                key="slider_w_kw",
-            )
+            w_kw = st.slider("Weight: Keywords", 0.0, 1.0, float(st.session_state.w_kw), 0.05, key="slider_w_kw")
 
         st.session_state.w_clf = w_clf
         st.session_state.w_sim = w_sim
@@ -799,11 +733,7 @@ with st.container():
         if total == 0:
             weights = {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2}
         else:
-            weights = {
-                "classifier": w_clf / total,
-                "similarity": w_sim / total,
-                "keywords": w_kw / total,
-            }
+            weights = {"classifier": w_clf / total, "similarity": w_sim / total, "keywords": w_kw / total}
 
         st.caption(
             f"Normalised weights →  P(Good Fit): {weights['classifier']:.2f},  "
@@ -826,12 +756,14 @@ with st.container():
 
     st.markdown("---")
 
+    # score buttons
     button_row = st.columns([0.35, 0.35, 0.3])
     with button_row[0]:
         single_btn = st.button("🔍 Score single candidate")
     with button_row[1]:
         batch_btn = st.button("🔍 Score candidates (batch)")
 
+    # ---------------- SINGLE ----------------
     if single_btn:
         jd_val = st.session_state.get("jd_text", "")
         resume_val = st.session_state.get("resume_text", "")
@@ -863,7 +795,6 @@ with st.container():
         st.write(f"**Predicted fit label:** {label}")
         st.write(f"**P(Good Fit):** {prob_good:.2f}")
         st.write(f"**{map_priority(score)}**")
-        st.markdown(result["highlight"])
         st.markdown("</div>", unsafe_allow_html=True)
 
         m1, m2, m3 = st.columns(3)
@@ -883,40 +814,42 @@ with st.container():
             st.write(f"{prob_good:.3f}")
             st.markdown("</div>", unsafe_allow_html=True)
 
-        with st.expander("Model-driven details"):
-            st.write("**JD summary**")
-            st.write(result["jd"]["summary"])
-            st.write("**Resume summary**")
-            st.write(result["resume"]["summary"])
-            st.write("**JD keywords (top)**")
-            st.write(result["jd"]["keywords"][:20])
-            st.write("**Entities (NER)**")
-            st.write(result["resume"].get("entities", {}))
+        # Evidence bullets
+        st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Evidence bullets</div>", unsafe_allow_html=True)
+        evidence = result.get("evidence_bullets", [])
+        if evidence:
+            for b in evidence:
+                st.markdown(f"- {b}")
+        else:
+            st.markdown("<span class='muted'>No strong JD-linked evidence lines were detected in the resume.</span>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
+        # Interview kit
+        st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Interview kit</div>", unsafe_allow_html=True)
+        kit = result.get("interview_kit", [])
+        for q in kit:
+            st.markdown(f"- {q}")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ---------------- BATCH ----------------
     if batch_btn:
         jd_val = st.session_state.get("jd_text", "")
 
-        # Only defined in batch mode path; keep safe:
-        batch_files = None
-        if st.session_state.get("mode") == "Batch (multiple resumes)":
-            # The uploader widget has a dynamic key; Streamlit returns its value already in this run:
-            # We retrieve it by searching session_state for keys starting with "batch_upload_"
-            for k in list(st.session_state.keys()):
-                if k.startswith("batch_upload_"):
-                    batch_files = st.session_state.get(k)
-                    break
-
         if not jd_val.strip():
             st.error("Please provide a job description in the Inputs section.")
-        elif not batch_files:
+        elif st.session_state.get("mode") != "Batch (multiple resumes)":
+            st.error("Please switch to Batch mode in the Inputs section to score multiple resumes.")
+        elif not uploaded_files:
             st.error("Please upload at least one resume file in the Inputs section.")
         else:
             MAX_RESUMES = 30
-            if len(batch_files) > MAX_RESUMES:
+            if len(uploaded_files) > MAX_RESUMES:
                 st.error(f"Too many files uploaded – maximum {MAX_RESUMES} per batch.")
             else:
                 resumes_list = []
-                for f in batch_files:
+                for f in uploaded_files:
                     text = _read_uploaded_file(f)
                     if text.strip():
                         resumes_list.append({"name": f.name, "text": text})
@@ -943,17 +876,16 @@ with st.container():
                     "File": r.get("file_name", f"Candidate {rank}"),
                     "Fit label": r["fit"]["label_name"],
                     "Final score (%)": round(r["final_score"] * 100, 1),
-                    "P(Good Fit)": round(r["prob_good_fit"], 3),
+                    "Priority": map_priority(r["final_score"]).replace("Interview priority: ", ""),
                     "Similarity": round(r["similarity"], 3),
                     "Keyword score": round(r["keyword_score"], 3),
                 }
             )
-
         st.dataframe(rows, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("<div class='section-title'>Candidate highlights</div>", unsafe_allow_html=True)
-
+        # Candidate selector
+        st.markdown("<div class='section-title'>Candidate selector</div>", unsafe_allow_html=True)
         options = [f"{i+1}. {r.get('file_name','Candidate')}" for i, r in enumerate(batch_results)]
         current_i = int(st.session_state.get("active_candidate_idx", 0))
         label = st.selectbox("Select a candidate", options=options, index=min(current_i, len(options)-1))
@@ -961,22 +893,36 @@ with st.container():
         st.session_state["active_candidate_idx"] = selected_i
 
         sel = batch_results[selected_i]
+
+        st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Selected candidate</div>", unsafe_allow_html=True)
         st.write(f"**File:** {sel.get('file_name', 'N/A')}")
         st.write(f"**Final score:** {sel['final_score']*100:.1f}%")
         st.write(f"**Fit label:** {sel['fit']['label_name']}")
-        st.markdown(sel["highlight"])
+        st.write(f"**{map_priority(sel['final_score'])}**")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        with st.expander("View all candidate highlights"):
-            for r in batch_results:
-                st.markdown(f"**{r.get('file_name', 'Candidate')}**")
-                st.write(
-                    f"- Final score: {r['final_score']*100:.1f}% "
-                    f"(label: {r['fit']['label_name']})"
-                )
-                st.markdown(r["highlight"])
-                st.write("---")
+        # Evidence bullets (short)
+        st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Evidence bullets (short)</div>", unsafe_allow_html=True)
+        ev = sel.get("evidence_bullets", [])[:3]
+        if ev:
+            for b in ev:
+                st.markdown(f"- {b}")
+        else:
+            st.markdown("<span class='muted'>No strong JD-linked evidence lines were detected in this resume.</span>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # Interview focus (short)
+        st.markdown("<div class='io-box'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Interview focus (short)</div>", unsafe_allow_html=True)
+        focus = sel.get("interview_kit", [])[:4]
+        for q in focus:
+            st.markdown(f"- {q}")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 # ============================================================
 # END
