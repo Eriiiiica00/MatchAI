@@ -536,7 +536,7 @@ def build_interview_kit(jd_keywords: list[str], evidence_lines: list[str], resum
         anchors = list(dict.fromkeys(anchors))[:2]
         if anchors:
             qs.append(
-                f"If you joined tomorrow, what would your first 30 days plan look like to deliver on **{', '.join(anchors)}**?"
+    f"You’ve had exposure to **{', '.join(anchors)}**. How would you apply that experience in this role during the initial onboarding period?"
             )
 
     # 3) dedupe
