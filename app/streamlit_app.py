@@ -198,11 +198,11 @@ def load_matchai_config(path: str | None = None):
             f"Using fallback config for demo. Error: {e}"
         )
         return {
-            "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
+            "fine_tuned_model_id": "InnaKim/MatchAI",
             "summarization_model": "sshleifer/distilbart-cnn-12-6",
             "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
             "weights": {"classifier": 0.4, "similarity": 0.4, "keywords": 0.2},
-            "label_id2name": {"0": "Not Fit", "1": "Good Fit"},
+            "label_id2name": {"0": "Not Fit", "1": "Potential Fit", "2": "Good fit"},
         }
 
 @st.cache_resource
