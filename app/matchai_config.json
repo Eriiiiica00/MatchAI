@@ -1,5 +1,5 @@
 {
-  "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
+  "fine_tuned_model_id": "InnaKim/MatchAI",
   "summarization_model": "sshleifer/distilbart-cnn-12-6",
   "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
   "weights": {
