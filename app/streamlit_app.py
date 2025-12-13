@@ -201,7 +201,7 @@ def load_matchai_config(path: str | None = None):
             "fine_tuned_model_id": "distilbert-base-uncased-finetuned-sst-2-english",
             "summarization_model": "sshleifer/distilbart-cnn-12-6",
             "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-            "weights": {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2},
+            "weights": {"classifier": 0.4, "similarity": 0.4, "keywords": 0.2},
             "label_id2name": {"0": "Not Fit", "1": "Good Fit"},
         }
 
@@ -246,7 +246,7 @@ def load_models_and_pipelines(cfg: dict):
 
 config = load_matchai_config()
 clf_tokenizer, clf_model, summarizer, sim_model, label_id2name = load_models_and_pipelines(config)
-DEFAULT_WEIGHTS = config.get("weights", {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2})
+DEFAULT_WEIGHTS = config.get("weights", {"classifier": 0.4, "similarity": 0.4, "keywords": 0.2})
 
 # ============================================================
 # 2. HELPERS (TEXT, KEYWORDS, EVIDENCE, QUESTIONS, SCORING)
@@ -825,7 +825,7 @@ with st.container():
                 "- **Semantic similarity** between JD and resume summaries\n"
                 "- **Keyword coverage** of JD terms in the resume\n\n"
                 "Default formula:\n"
-                "**Final Score = 0.5 × P(Good Fit) + 0.3 × Similarity + 0.2 × Keyword Coverage**.\n\n"
+                "**Final Score = 0.4 × P(Good Fit) + 0.4 × Similarity + 0.2 × Keyword Coverage**.\n\n"
                 "Weights can be adjusted below to reflect different HR priorities."
             )
 
@@ -854,7 +854,7 @@ with st.container():
 
         total = w_clf + w_sim + w_kw
         if total == 0:
-            weights = {"classifier": 0.5, "similarity": 0.3, "keywords": 0.2}
+            weights = {"classifier": 0.4, "similarity": 0.4, "keywords": 0.2}
         else:
             weights = {
                 "classifier": w_clf / total,
