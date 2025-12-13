@@ -622,19 +622,23 @@ def new_evaluation():
 # 3. HEADER (New evaluation icon aligned with subtitle, right side)
 # ============================================================
 
-st.title("🔍 MatchAI: Candidate Suitability Screening")
+title_col, action_col = st.columns([0.75, 0.25], vertical_alignment="center")
 
-sub_l, sub_r = st.columns([0.88, 0.12], vertical_alignment="center")
-
-with sub_l:
+with title_col:
+    st.title("🔍 MatchAI: Candidate Suitability Screening")
     st.markdown(
         "<span class='muted'>Screen and prioritise candidates against a specific job description.</span>",
         unsafe_allow_html=True,
     )
 
-with sub_r:
-    st.markdown("<div class='icon-btn' style='display:flex; justify-content:flex-end;'>", unsafe_allow_html=True)
-    st.button("?", help="New evaluation (clears inputs and uploads).", on_click=new_evaluation)
+with action_col:
+    # Right-aligned action button
+    st.markdown("<div style='text-align:right; padding-top:2.2rem;'>", unsafe_allow_html=True)
+    st.button(
+        "New evaluation",
+        on_click=new_evaluation,
+        type="secondary",
+    )
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
