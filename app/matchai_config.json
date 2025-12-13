@@ -4,8 +4,8 @@
   "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
   "ner_model": "dslim/bert-base-NER",
   "weights": {
-    "classifier": 0.5,
-    "similarity": 0.3,
+    "classifier": 0.4,
+    "similarity": 0.4,
     "keywords": 0.2
   },
   "label_id2name": {
