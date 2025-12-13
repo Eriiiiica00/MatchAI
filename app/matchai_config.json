@@ -9,6 +9,7 @@
   },
   "label_id2name": {
     "0": "Not Fit",
-    "1": "Good Fit"
+    "1": "Potential Fit"
+    "2": "Good Fit"
   }
 }
