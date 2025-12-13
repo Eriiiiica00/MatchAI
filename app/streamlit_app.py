@@ -448,41 +448,101 @@ def extract_evidence_bullets(jd_keywords: list[str], resume_raw: str, max_bullet
 
     return evidence, matched_all
 
-def build_interview_kit(jd_keywords: list[str], evidence_lines: list[str], max_q: int = 5):
+def missing_keywords(jd_keywords: list[str], resume_raw: str, top_n: int = 6) -> list[str]:
     """
-    Only generate questions if there is concrete evidence to probe.
-    Questions are anchored to the evidence lines (not generic).
+    Keywords in JD that are not obvious in resume text.
     """
-    if not evidence_lines:
+    if not jd_keywords or not resume_raw:
         return []
+    resume_set = set(_tokens(resume_raw))
+    missing = [k for k in jd_keywords if k not in resume_set]
+    return missing[:top_n]
 
+def dedupe_questions(questions: list[str], jaccard_threshold: float = 0.78) -> list[str]:
+    """
+    Removes near-duplicate questions.
+    Uses token Jaccard similarity on normalized text.
+    """
+    def norm(q: str) -> str:
+        q = (q or "").lower()
+        q = q.translate(str.maketrans("", "", string.punctuation))
+        q = re.sub(r"\s+", " ", q).strip()
+        return q
+
+    def toks(q: str) -> set[str]:
+        return set([t for t in norm(q).split() if len(t) >= 3])
+
+    kept = []
+    kept_sets = []
+
+    for q in questions:
+        nq = norm(q)
+        if not nq:
+            continue
+
+        qt = toks(q)
+        is_dup = False
+        for prev_t in kept_sets:
+            inter = len(qt & prev_t)
+            union = len(qt | prev_t) or 1
+            j = inter / union
+            if j >= jaccard_threshold:
+                is_dup = True
+                break
+
+        if not is_dup:
+            kept.append(q)
+            kept_sets.append(qt)
+
+    return kept
+
+def build_interview_kit(jd_keywords: list[str], evidence_lines: list[str], resume_raw: str, max_q: int = 5):
+    """
+    Variety + relevance:
+    1) Build questions from evidence bullets (max 2 bullets)
+    2) Add 1–2 role-fit questions from missing keywords
+    3) Run dedupe_questions()
+    4) Cap to max_q
+    """
     qs = []
-    jd_set = set(jd_keywords)
+    jd_set = set(jd_keywords or [])
 
-    # For each evidence line, make a probing question
-    for ln in evidence_lines:
+    # (1) Evidence-based questions (max 2 bullets)
+    for ln in (evidence_lines or [])[:2]:
         toks = set(_tokens(ln))
-        overlap = [kw for kw in jd_set if kw in toks]
+        overlap = [kw for kw in jd_keywords if kw in toks]
         anchor = overlap[0] if overlap else "this"
         qs.append(
             f'You mentioned “{ln}”. Can you walk me through your specific role, scope, and measurable outcomes (tools, stakeholders, impact), especially around **{anchor}**?'
         )
-        if len(qs) >= max_q:
-            break
 
-    # Add 1 synthesis question if room
-    if len(qs) < max_q:
-        # pick 2-3 anchors from all overlaps
+    # (2) Role-fit questions from missing keywords (1–2)
+    miss = missing_keywords(jd_keywords, resume_raw or "", top_n=8)
+    # Prefer the most “role-specific” misses (longer words tend to be more specific)
+    miss = sorted(miss, key=lambda x: (-len(x), x))[:2]
+
+    for kw in miss:
+        qs.append(
+            f"The JD emphasizes **{kw}**. What hands-on exposure do you have to **{kw}**, and how would you apply it in this role?"
+        )
+
+    # Optional: add 1 synthesis question if we have at least 1 evidence question and room
+    if any("You mentioned" in q for q in qs) and len(qs) < max_q:
+        # pull 2 anchors from evidence
         anchors = []
-        for ln in evidence_lines:
-            toks = set(_tokens(ln))
-            anchors.extend([k for k in jd_keywords if k in toks])
-        anchors = list(dict.fromkeys(anchors))[:3]
+        for ln in (evidence_lines or [])[:2]:
+            t = set(_tokens(ln))
+            anchors.extend([k for k in jd_keywords if k in t])
+        anchors = list(dict.fromkeys(anchors))[:2]
         if anchors:
             qs.append(
                 f"If you joined tomorrow, what would your first 30 days plan look like to deliver on **{', '.join(anchors)}**?"
             )
 
+    # (3) Dedupe
+    qs = dedupe_questions(qs)
+
+    # (4) Cap to 5
     return qs[:max_q]
 
 def map_priority(score: float) -> str:
@@ -516,7 +576,7 @@ def evaluate_candidate(jd_text: str, res_text: str, weights: dict):
 
     # Evidence + interview kit
     evidence, matched_kw = extract_evidence_bullets(jd["keywords"], res["raw"], max_bullets=5)
-    questions = build_interview_kit(jd["keywords"], evidence, max_q=5)
+    questions = build_interview_kit(jd["keywords"], evidence, res["raw"], max_q=5)
 
     return {
         "jd": jd,
