@@ -448,6 +448,8 @@ def extract_evidence_bullets(jd_keywords: list[str], resume_raw: str, max_bullet
 
     return evidence, matched_all
 
+# ---------- Interview question variety + dedupe ----------
+
 def missing_keywords(jd_keywords: list[str], resume_raw: str, top_n: int = 6) -> list[str]:
     """
     Keywords in JD that are not obvious in resume text.
@@ -498,16 +500,16 @@ def dedupe_questions(questions: list[str], jaccard_threshold: float = 0.78) -> l
 
 def build_interview_kit(jd_keywords: list[str], evidence_lines: list[str], resume_raw: str, max_q: int = 5):
     """
-    Variety + relevance:
+    To ensure variety and relevance:
     1) Build questions from evidence bullets (max 2 bullets)
     2) Add 1–2 role-fit questions from missing keywords
     3) Run dedupe_questions()
-    4) Cap to max_q
+    4) Cap to 5
     """
-    qs = []
-    jd_set = set(jd_keywords or [])
+    qs: list[str] = []
+    jd_keywords = jd_keywords or []
 
-    # (1) Evidence-based questions (max 2 bullets)
+    # 1) Evidence-based questions (max 2 bullets)
     for ln in (evidence_lines or [])[:2]:
         toks = set(_tokens(ln))
         overlap = [kw for kw in jd_keywords if kw in toks]
@@ -516,9 +518,8 @@ def build_interview_kit(jd_keywords: list[str], evidence_lines: list[str], resum
             f'You mentioned “{ln}”. Can you walk me through your specific role, scope, and measurable outcomes (tools, stakeholders, impact), especially around **{anchor}**?'
         )
 
-    # (2) Role-fit questions from missing keywords (1–2)
-    miss = missing_keywords(jd_keywords, resume_raw or "", top_n=8)
-    # Prefer the most “role-specific” misses (longer words tend to be more specific)
+    # 2) Role-fit from missing keywords (1–2)
+    miss = missing_keywords(jd_keywords, resume_raw or "", top_n=10)
     miss = sorted(miss, key=lambda x: (-len(x), x))[:2]
 
     for kw in miss:
@@ -526,9 +527,8 @@ def build_interview_kit(jd_keywords: list[str], evidence_lines: list[str], resum
             f"The JD emphasizes **{kw}**. What hands-on exposure do you have to **{kw}**, and how would you apply it in this role?"
         )
 
-    # Optional: add 1 synthesis question if we have at least 1 evidence question and room
+    # Optional: 1 synthesis question if evidence exists and room
     if any("You mentioned" in q for q in qs) and len(qs) < max_q:
-        # pull 2 anchors from evidence
         anchors = []
         for ln in (evidence_lines or [])[:2]:
             t = set(_tokens(ln))
@@ -539,10 +539,10 @@ def build_interview_kit(jd_keywords: list[str], evidence_lines: list[str], resum
                 f"If you joined tomorrow, what would your first 30 days plan look like to deliver on **{', '.join(anchors)}**?"
             )
 
-    # (3) Dedupe
+    # 3) dedupe
     qs = dedupe_questions(qs)
 
-    # (4) Cap to 5
+    # 4) cap
     return qs[:max_q]
 
 def map_priority(score: float) -> str:
@@ -606,7 +606,6 @@ def evaluate_batch(jd_text: str, resumes_list: list, weights: dict):
     results_sorted = sorted(results, key=lambda x: x["final_score"], reverse=True)
 
     # differentiator sentence per candidate
-    # compute group averages
     if results_sorted:
         avg_sim = float(np.mean([x["similarity"] for x in results_sorted]))
         avg_kw = float(np.mean([x["keyword_score"] for x in results_sorted]))
@@ -615,12 +614,10 @@ def evaluate_batch(jd_text: str, resumes_list: list, weights: dict):
         avg_sim = avg_kw = avg_prob = 0.0
 
     for idx, r in enumerate(results_sorted, start=1):
-        # dominant driver (relative to avg)
         sim_delta = r["similarity"] - avg_sim
         kw_delta = r["keyword_score"] - avg_kw
         prob_delta = r["prob_good_fit"] - avg_prob
 
-        # choose the strongest positive delta; if none, choose the least negative
         deltas = {
             "semantic similarity": sim_delta,
             "keyword coverage": kw_delta,
@@ -628,15 +625,18 @@ def evaluate_batch(jd_text: str, resumes_list: list, weights: dict):
         }
         driver = max(deltas.items(), key=lambda kv: kv[1])[0]
 
-        # craft sentence
         if driver == "semantic similarity":
-            sentence = f"Stands out with {driver} versus other candidates."
+            sentence = "Stands out with stronger semantic similarity versus other candidates."
+            short = "Stronger similarity"
         elif driver == "keyword coverage":
-            sentence = f"Stands out with stronger {driver} of JD terms."
+            sentence = "Stands out with stronger keyword coverage of JD terms versus other candidates."
+            short = "Stronger keywords"
         else:
-            sentence = f"Stands out with higher {driver} from the classifier."
+            sentence = "Stands out with higher model confidence versus other candidates."
+            short = "Higher confidence"
 
-        r["differentiator"] = sentence
+        r["differentiator"] = sentence              # full sentence for below-table list + selected candidate
+        r["differentiator_short"] = short           # short tag for the table (prevents truncation)
         r["rank"] = idx
 
     return results_sorted
@@ -681,16 +681,6 @@ def new_evaluation():
 # ============================================================
 # 3. HEADER (Title on first row, subtitle + New evaluation on second row)
 # ============================================================
-
-def new_evaluation():
-    st.session_state["jd_text"] = ""
-    st.session_state["resume_text"] = ""
-    st.session_state["upload_note"] = ""
-    st.session_state.pop("last_single_result", None)
-    st.session_state.pop("last_batch_results", None)
-    st.session_state["active_candidate_idx"] = 0
-    st.session_state["uploader_nonce"] = st.session_state.get("uploader_nonce", 0) + 1
-    st.rerun()
 
 # ---- Title row ----
 st.markdown(
@@ -770,7 +760,6 @@ with st.container():
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Populate resume_text BEFORE rendering the widget (prevents StreamlitAPIException)
         if uploaded_file is not None:
             extracted = _read_uploaded_file(uploaded_file)
             if extracted:
@@ -933,6 +922,8 @@ with st.container():
             with st.spinner("Analyzing candidate profile…"):
                 result = evaluate_candidate(jd_val, resume_val, weights)
                 st.session_state["last_single_result"] = result
+                # ✅ clear batch results so both blocks never show together
+                st.session_state.pop("last_batch_results", None)
 
             st.session_state["is_evaluating"] = False
             st.session_state["pending_action"] = None
@@ -972,13 +963,18 @@ with st.container():
                         batch_results = evaluate_batch(jd_val, resumes_list, weights)
                         st.session_state["last_batch_results"] = batch_results
                         st.session_state["active_candidate_idx"] = 0
+                        # ✅ clear single results so both blocks never show together
+                        st.session_state.pop("last_single_result", None)
 
                     st.session_state["is_evaluating"] = False
                     st.session_state["pending_action"] = None
                     st.rerun()
 
+    # Render only the block that matches the current mode & latest result
+    mode_now = st.session_state.get("mode", "Single candidate")
+
     # ---------------- SINGLE RESULT RENDER ----------------
-    if "last_single_result" in st.session_state:
+    if mode_now == "Single candidate" and "last_single_result" in st.session_state:
         result = st.session_state["last_single_result"]
         score = result["final_score"]
         score_pct = score * 100
@@ -997,7 +993,6 @@ with st.container():
         st.write(f"**Fit label:** {label}")
         st.write(f"**P(Good Fit):** {prob_good:.2f}")
 
-        # (3) Metrics moved up right after priority
         m1, m2, m3 = st.columns(3)
         with m1:
             st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
@@ -1017,7 +1012,6 @@ with st.container():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Evidence bullets + Interview kit logic
         st.markdown("<div class='section-title'>Evidence bullets</div>", unsafe_allow_html=True)
         if not result["evidence"]:
             st.write("No clear JD-aligned evidence was found in the resume body. Relevance should be validated via targeted interview discussion and follow-up questions.")
@@ -1028,7 +1022,6 @@ with st.container():
                 st.write(f"- “{e}”")
 
             st.markdown("<div class='section-title' style='margin-top:1rem;'>Interview kit</div>", unsafe_allow_html=True)
-            # (5) only generate questions when something concrete to probe
             if result["questions"]:
                 for q in result["questions"][:5]:
                     st.write(f"- {q}")
@@ -1036,7 +1029,7 @@ with st.container():
                 st.write("Evidence exists, but it is not specific enough to generate targeted questions. Use the interview to probe scope, ownership, and measurable impact for the evidence bullets above.")
 
     # ---------------- BATCH RESULT RENDER ----------------
-    if "last_batch_results" in st.session_state:
+    if mode_now == "Batch (multiple resumes)" and "last_batch_results" in st.session_state:
         batch_results = st.session_state["last_batch_results"]
 
         st.markdown("<div class='io-box'>", unsafe_allow_html=True)
@@ -1049,22 +1042,24 @@ with st.container():
                 {
                     "Rank": r.get("rank"),
                     "File": r.get("file_name", "Candidate"),
-                    # (7-2) priority first, then final score, fit label, similarity, keyword
                     "Priority": priority,
                     "Final score (%)": round(r["final_score"] * 100, 1),
                     "Fit label": r["fit"]["label_name"],
-                    # (7-1) percentages
                     "Similarity (%)": round(r["similarity"] * 100, 1),
                     "Keyword (%)": round(r["keyword_score"] * 100, 1),
-                    # (7-3) differentiator
-                    "Why this candidate": r.get("differentiator", ""),
+                    # Use short tag to avoid truncation in dataframe
+                    "Why this candidate": r.get("differentiator_short", ""),
                 }
             )
 
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Candidate selector
+        # Full sentences displayed below the table (no sideways scrolling / truncation)
+        st.markdown("<div class='section-title' style='margin-top:0.75rem;'>Why these candidates differ</div>", unsafe_allow_html=True)
+        for r in batch_results:
+            st.write(f"- **{r.get('file_name','Candidate')}**: {r.get('differentiator','')}")
+
         st.markdown("<div class='section-title'>Candidate details</div>", unsafe_allow_html=True)
         options = [f"{i+1}. {r.get('file_name','Candidate')}" for i, r in enumerate(batch_results)]
         current_i = int(st.session_state.get("active_candidate_idx", 0))
@@ -1073,7 +1068,6 @@ with st.container():
         st.session_state["active_candidate_idx"] = selected_i
         sel = batch_results[selected_i]
 
-        # (8) Same layout as single candidate
         score = sel["final_score"]
         score_pct = score * 100
         label = sel["fit"]["label_name"]
@@ -1112,7 +1106,6 @@ with st.container():
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Evidence + Interview focus (short)
         st.markdown("<div class='section-title'>Evidence bullets (short)</div>", unsafe_allow_html=True)
         if not sel["evidence"]:
             st.write("No clear JD-aligned evidence was found in the resume body. Relevance should be validated via interview deep dive.")
