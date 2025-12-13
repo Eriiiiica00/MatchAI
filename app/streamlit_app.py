@@ -619,27 +619,36 @@ def new_evaluation():
     st.rerun()
 
 # ============================================================
-# 3. HEADER (New evaluation icon aligned with subtitle, right side)
+# 3. HEADER (Title on first row, subtitle + New evaluation on second row)
 # ============================================================
 
-title_col, action_col = st.columns([0.75, 0.25], vertical_alignment="center")
+def new_evaluation():
+    st.session_state["jd_text"] = ""
+    st.session_state["resume_text"] = ""
+    st.session_state["upload_note"] = ""
+    st.session_state.pop("last_single_result", None)
+    st.session_state.pop("last_batch_results", None)
+    st.session_state["active_candidate_idx"] = 0
+    st.session_state["uploader_nonce"] = st.session_state.get("uploader_nonce", 0) + 1
+    st.rerun()
 
-with title_col:
-    st.title("🔍 MatchAI: Candidate Suitability Screening")
+# ---- Title row ----
+st.markdown(
+    "<h1 style='margin-bottom:0.2rem;'>🔍 MatchAI: Candidate Suitability Screening</h1>",
+    unsafe_allow_html=True,
+)
+
+# ---- Subtitle + action row ----
+sub_col, btn_col = st.columns([0.8, 0.2], vertical_alignment="center")
+
+with sub_col:
     st.markdown(
         "<span class='muted'>Screen and prioritise candidates against a specific job description.</span>",
         unsafe_allow_html=True,
     )
 
-with action_col:
-    # Right-aligned action button
-    st.markdown("<div style='text-align:right; padding-top:2.2rem;'>", unsafe_allow_html=True)
-    st.button(
-        "New evaluation",
-        on_click=new_evaluation,
-        type="secondary",
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
+with btn_col:
+    st.button("New evaluation", on_click=new_evaluation)
 
 # ============================================================
 # 4. INPUTS CARD
